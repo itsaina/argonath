@@ -1,0 +1,80 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+@import "tailwindcss";
+
+@theme inline {
+  /* Brand */
+  --color-brand-900: #0a1628;
+  --color-brand-800: #0f2140;
+  --color-brand-700: #142d58;
+  --color-brand-600: #1a3a70;
+  --color-brand-500: #1f4788;
+  --color-brand-400: #3a6bb5;
+  --color-brand-300: #6b96d1;
+  --color-brand-200: #a3bfe6;
+  --color-brand-100: #d1dffa;
+  --color-brand-50: #edf2fc;
+
+  /* Gold */
+  --color-gold-700: #7a5e1e;
+  --color-gold-600: #9b7a2f;
+  --color-gold-500: #c49b3a;
+  --color-gold-400: #d4af51;
+  --color-gold-300: #e2c878;
+  --color-gold-200: #f0dda3;
+  --color-gold-100: #f8f0d4;
+  --color-gold-50: #fffcf0;
+
+  /* Semantic */
+  --color-success-600: #059669;
+  --color-success-500: #10b981;
+  --color-success-400: #34d399;
+  --color-success-100: #d1fae5;
+  --color-success-50: #ecfdf5;
+
+  --color-warning-600: #d97706;
+  --color-warning-500: #f59e0b;
+  --color-warning-400: #fbbf24;
+  --color-warning-100: #fef3c7;
+  --color-warning-50: #fffbeb;
+
+  --color-danger-600: #dc2626;
+  --color-danger-500: #ef4444;
+  --color-danger-400: #f87171;
+  --color-danger-100: #fee2e2;
+  --color-danger-50: #fef2f2;
+
+  --color-info-600: #2563eb;
+  --color-info-500: #3b82f6;
+  --color-info-100: #dbeafe;
+
+  /* Font families */
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #f9fafb;
+  color: #111827;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f3f4f6;
+}
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
