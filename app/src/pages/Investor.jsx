@@ -127,10 +127,8 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
     setRedeemLoading(l => ({ ...l, [claim.id]: true }));
     setRedeemStatus(s => ({ ...s, [claim.id]: '' }));
     try {
-      // 1. Autorisation on-chain via backend (mode test : pas d'OTP requis)
-      await authorizeTest(phone, toEvmAddress(accountId));
-
-      // 2. Association HTS (silencieuse si déjà associé)
+      // 1. Association HTS (silencieuse si déjà associé)
+      // L'autorisation on-chain a déjà été faite lors de la vérification OTP WhatsApp.
       await handleAssociate();
 
       // 3. Redeem on-chain via ClaimRegistry EVM
