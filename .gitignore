@@ -24,7 +24,9 @@ cache/
 # Claude AI context
 .claude/
 
-# SQLite database (données locales)
+# SQLite database et logs
+*.db
+*.log
 backend/data/
 
 # misc
