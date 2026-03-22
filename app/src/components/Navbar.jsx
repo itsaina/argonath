@@ -5,9 +5,10 @@ import { useWalletInterface } from '../services/wallets/useWalletInterface';
 import { WalletSelectionDialog } from './WalletSelectionDialog';
 
 const NAV_LINKS = [
-  { label: 'Dépositaire', path: '/depositary' },
-  { label: 'Investisseur', path: '/investor' },
-  { label: 'Marché', path: '/market' },
+  { label: 'Depositary', path: '/depositary' },
+  { label: 'Investor',   path: '/investor' },
+  { label: 'Market',     path: '/market' },
+  { label: 'Docs',       path: '/docs' },
 ];
 
 export default function NavBar() {
@@ -65,7 +66,7 @@ export default function NavBar() {
           onClick={handleConnect}
           sx={{ backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' } }}
         >
-          {accountId ? `Connecté: ${accountId.slice(0, 10)}…` : 'Connecter Wallet'}
+          {accountId ? `Connected: ${accountId.slice(0, 10)}…` : 'Connect Wallet'}
         </Button>
       </Toolbar>
       <WalletSelectionDialog open={open} setOpen={setOpen} onClose={() => setOpen(false)} />

@@ -68,7 +68,7 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
       catch { setClaims([]); setSearched(true); }
       setClaimsLoading(false);
     } catch (err) {
-      setOtpError(err.message || 'Erreur lors de l\'autorisation test.');
+      setOtpError(err.message || 'Test authorization error.');
     }
     setOtpLoading(false);
   };
@@ -80,7 +80,7 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
       await sendOtp(phone);
       setStep('otp');
     } catch (err) {
-      setOtpError(err.message || 'Impossible d\'envoyer l\'OTP.');
+      setOtpError(err.message || 'Failed to send OTP.');
     }
     setOtpLoading(false);
   };
@@ -98,7 +98,7 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
       catch { setClaims([]); setSearched(true); }
       setClaimsLoading(false);
     } catch (err) {
-      setOtpError('Code incorrect ou expiré. Réessayez.');
+      setOtpError('Incorrect or expired code. Please try again.');
     }
     setOtpLoading(false);
   };
@@ -167,44 +167,44 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
 
   return (
     <Stack spacing={3}>
-      <Typography variant="h6" fontWeight={700} color="#03045e">Mes titres disponibles</Typography>
+      <Typography variant="h6" fontWeight={700} color="#03045e">My Available T-Bills</Typography>
 
-      {/* Étape 1 : saisie du numéro */}
+      {/* Step 1: phone number */}
       {step === 'phone' && (
         <Stack spacing={2} maxWidth={420}>
           <Typography variant="body2" color="#666">
-            Entrez votre numéro WhatsApp pour recevoir un code de vérification.
+            Enter your WhatsApp number to receive a verification code.
           </Typography>
           <Stack direction="row" spacing={2}>
             <TextField
-              label="Numéro WhatsApp" value={phone}
-              onChange={e => setPhone(e.target.value)}
+              label="WhatsApp Number" value={phone}
+              onChange={e => setPhone(e.target.value.replace(/[\s\-().]/g, ''))}
               onKeyDown={e => e.key === 'Enter' && handleSendOtp()}
-              placeholder="+261 XX XX XXX XX"
+              placeholder="+33 7 XX XX XX XX"
               fullWidth
             />
             <Button variant="contained" onClick={handleSendOtp} disabled={otpLoading || !phone}
               sx={{ backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' }, whiteSpace: 'nowrap' }}>
-              {otpLoading ? <CircularProgress size={18} color="inherit" /> : 'Envoyer OTP'}
+              {otpLoading ? <CircularProgress size={18} color="inherit" /> : 'Send OTP'}
             </Button>
           </Stack>
           {otpError && <Alert severity="error" sx={{ py: 0 }}>{otpError}</Alert>}
           <Button size="small" variant="outlined" onClick={handleTestAuthorize} disabled={otpLoading || !phone}
             sx={{ alignSelf: 'flex-start', borderColor: '#f57c00', color: '#f57c00', fontSize: 11 }}>
-            {otpLoading ? <CircularProgress size={14} color="inherit" /> : '⚡ Mode test (sans OTP)'}
+            {otpLoading ? <CircularProgress size={14} color="inherit" /> : '⚡ Test mode (no OTP)'}
           </Button>
         </Stack>
       )}
 
-      {/* Étape 2 : saisie du code OTP */}
+      {/* Step 2: OTP code */}
       {step === 'otp' && (
         <Stack spacing={2} maxWidth={420}>
           <Alert severity="success" sx={{ py: 0 }}>
-            Code envoyé sur WhatsApp au <b>{phone}</b>
+            Code sent on WhatsApp to <b>{phone}</b>
           </Alert>
           <Stack direction="row" spacing={2}>
             <TextField
-              label="Code OTP" value={otpCode}
+              label="OTP Code" value={otpCode}
               onChange={e => setOtpCode(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleVerifyOtp()}
               placeholder="123456"
@@ -212,35 +212,35 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
             />
             <Button variant="contained" onClick={handleVerifyOtp} disabled={otpLoading || !otpCode}
               sx={{ backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' }, whiteSpace: 'nowrap' }}>
-              {otpLoading ? <CircularProgress size={18} color="inherit" /> : 'Vérifier'}
+              {otpLoading ? <CircularProgress size={18} color="inherit" /> : 'Verify'}
             </Button>
           </Stack>
           {otpError && <Alert severity="error" sx={{ py: 0 }}>{otpError}</Alert>}
           <Button size="small" onClick={() => { setStep('phone'); setOtpCode(''); setOtpError(''); }}
             sx={{ alignSelf: 'flex-start', color: '#888', fontSize: 11 }}>
-            ← Changer de numéro
+            ← Change number
           </Button>
         </Stack>
       )}
 
-      {/* Étape 3 : numéro vérifié, affichage des titres */}
+      {/* Step 3: verified, show T-Bills */}
       {step === 'verified' && (
         <>
           <Stack direction="row" spacing={2} alignItems="center" maxWidth={420}>
             <TextField
-              label="Numéro WhatsApp" value={phone} fullWidth disabled
+              label="WhatsApp Number" value={phone} fullWidth disabled
               sx={{ '& .MuiInputBase-input.Mui-disabled': { WebkitTextFillColor: '#555' } }}
             />
             <Button size="small" variant="outlined" onClick={handleUnlink}
               sx={{ whiteSpace: 'nowrap', borderColor: '#ccc', color: '#888', fontSize: 11 }}>
-              Délier
+              Unlink
             </Button>
           </Stack>
 
           {claimsLoading && <CircularProgress sx={{ alignSelf: 'flex-start' }} />}
 
           {searched && claims.length === 0 && !claimsLoading && (
-            <Alert severity="info">Aucun titre disponible pour ce numéro.</Alert>
+            <Alert severity="info">No T-Bills available for this number.</Alert>
           )}
 
           {claims.map(c => (
@@ -249,37 +249,37 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
                 <Stack spacing={0.5}>
                   <Stack direction="row" spacing={1} alignItems="center">
                     <Typography fontWeight={700} color="#03045e">{c.bond_type}</Typography>
-                    <Chip label={c.status === 'published' ? 'Publié' : 'Disponible'} size="small"
+                    <Chip label={c.status === 'published' ? 'Published' : 'Available'} size="small"
                       sx={{ backgroundColor: STATUS_COLORS[c.status]?.bg, color: STATUS_COLORS[c.status]?.color, fontWeight: 600 }} />
                   </Stack>
                   <Typography variant="body2" color="#666">
-                    Montant : <b>{Number(c.nominal_amount).toLocaleString()} MGA</b> · Taux : <b>{(Number(c.rate) * 100).toFixed(2)}%</b>
+                    Amount: <b>{Number(c.nominal_amount).toLocaleString()} MGA</b> · Rate: <b>{Number(c.rate).toFixed(2)}%</b>
                   </Typography>
                   <Typography variant="body2" color="#666">
-                    Maturité : <b>{new Date(c.maturity_date).toLocaleDateString('fr-FR')}</b> · Lot : <b>{c.batch_id}</b>
+                    Maturity: <b>{new Date(c.maturity_date).toLocaleDateString('en-US')}</b> · Batch: <b>{c.batch_id}</b>
                   </Typography>
                 </Stack>
                 <Stack spacing={1} alignItems={{ md: 'flex-end' }}>
                   {redeemStatus[c.id]?.status === 'success' && (
                     <Stack spacing={0.5}>
-                      <Alert severity="success" sx={{ py: 0 }}>1 ARGN minté et transféré ✓</Alert>
+                      <Alert severity="success" sx={{ py: 0 }}>1 ARGN minted and transferred ✓</Alert>
                       {redeemStatus[c.id].hashscanEvmTx && (
                         <Typography variant="caption">
                           <a href={redeemStatus[c.id].hashscanEvmTx} target="_blank" rel="noreferrer" style={{ color: '#1565c0' }}>
-                            Voir tx EVM sur HashScan →
+                            View EVM tx on HashScan →
                           </a>
                         </Typography>
                       )}
                       {redeemStatus[c.id].hashscanHts && (
                         <Typography variant="caption">
                           <a href={redeemStatus[c.id].hashscanHts} target="_blank" rel="noreferrer" style={{ color: '#1565c0' }}>
-                            Voir tx HTS sur HashScan →
+                            View HTS tx on HashScan →
                           </a>
                         </Typography>
                       )}
                     </Stack>
                   )}
-                  {redeemStatus[c.id]?.status === 'error' && <Alert severity="error" sx={{ py: 0 }}>Échec du redeem</Alert>}
+                  {redeemStatus[c.id]?.status === 'error' && <Alert severity="error" sx={{ py: 0 }}>Redeem failed</Alert>}
                   <Button variant="contained" disabled={redeemLoading[c.id]}
                     onClick={() => handleRedeem(c)}
                     sx={{ backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' }, minWidth: 140 }}>
@@ -344,20 +344,20 @@ function PortfolioSection({ accountId }) {
 
   return (
     <Stack spacing={3}>
-      <Typography variant="h6" fontWeight={700} color="#03045e">Mon portefeuille</Typography>
+      <Typography variant="h6" fontWeight={700} color="#03045e">My Portfolio</Typography>
       {!hasContracts ? (
-        <Alert severity="warning">Contrats non déployés. Configurez les adresses dans <code>.env</code>.</Alert>
+        <Alert severity="warning">Contracts not deployed. Configure addresses in <code>.env</code>.</Alert>
       ) : loading ? (
         <CircularProgress />
       ) : argnBalance === null ? (
-        <Alert severity="info">Impossible de lire la balance.</Alert>
+        <Alert severity="info">Unable to read balance.</Alert>
       ) : argnBalance === '0' ? (
-        <Alert severity="info">Aucun titre ARGN dans votre wallet.</Alert>
+        <Alert severity="info">No ARGN tokens in your wallet.</Alert>
       ) : (
         <Paper elevation={0} sx={{ border: '1.5px solid #e0e0e0', borderRadius: 3, p: 3 }}>
           <Typography variant="h4" fontWeight={700} color="#03045e">{argnBalance} <span style={{ fontSize: 18, color: '#888' }}>ARGN</span></Typography>
-          <Typography variant="body2" color="#666" mt={0.5}>Titres Argonath Bond tokenisés dans votre wallet</Typography>
-          <Button size="small" variant="outlined" onClick={loadPortfolio} sx={{ mt: 2, borderColor: '#03045e', color: '#03045e', fontSize: 12 }}>Actualiser</Button>
+          <Typography variant="body2" color="#666" mt={0.5}>Argonath Bond tokens in your wallet</Typography>
+          <Button size="small" variant="outlined" onClick={loadPortfolio} sx={{ mt: 2, borderColor: '#03045e', color: '#03045e', fontSize: 12 }}>Refresh</Button>
         </Paper>
       )}
     </Stack>
@@ -366,20 +366,20 @@ function PortfolioSection({ accountId }) {
 
 // Libellés lisibles pour chaque événement HCS
 const HCS_EVENT_LABELS = {
-  wallet_phone_linked:          '🔗 Wallet lié à un compte vérifié',
-  allocation_created:           '📄 Allocation de titre créée',
-  allocation_status_changed:    '🔄 Statut d\'allocation mis à jour',
-  allocation_redeemed:          '🏦 Allocation rachetée (ARGN minted)',
-  repo_lending_offer_created:   '💰 Offre de liquidité créée',
-  repo_borrow_request_created:  '📋 Demande d\'emprunt créée',
-  repo_offer_accepted:          '✅ Offre acceptée',
-  repo_proposal_submitted:      '📨 Proposition soumise',
-  repo_proposal_accepted:       '🤝 Proposition acceptée',
-  repo_request_funded:          '💸 Demande financée',
-  repo_repaid:                  '💳 Remboursement effectué',
-  repo_default_claimed:         '⚠️ Défaut réclamé',
-  repo_offer_cancelled:         '❌ Offre annulée',
-  repo_request_cancelled:       '❌ Demande annulée',
+  wallet_phone_linked:          'Wallet linked to verified account',
+  allocation_created:           'T-Bill allocation created',
+  allocation_status_changed:    'Allocation status updated',
+  allocation_redeemed:          'Allocation redeemed (ARGN minted)',
+  repo_lending_offer_created:   'Lending offer created',
+  repo_borrow_request_created:  'Borrow request created',
+  repo_offer_accepted:          'Offer accepted',
+  repo_proposal_submitted:      'Proposal submitted',
+  repo_proposal_accepted:       'Proposal accepted',
+  repo_request_funded:          'Borrow request funded',
+  repo_repaid:                  'Repayment completed',
+  repo_default_claimed:         'Default claimed',
+  repo_offer_cancelled:         'Offer cancelled',
+  repo_request_cancelled:       'Request cancelled',
 };
 
 // ─── Section : Historique HCS ─────────────────────────────────────────────────
@@ -407,20 +407,20 @@ function HistorySection({ accountId }) {
   return (
     <Stack spacing={3}>
       <Stack direction="row" justifyContent="space-between" alignItems="center">
-        <Typography variant="h6" fontWeight={700} color="#03045e">Mon historique notarial</Typography>
+        <Typography variant="h6" fontWeight={700} color="#03045e">My Notarial History</Typography>
         <Button size="small" variant="outlined" onClick={load} disabled={loading}
           sx={{ borderColor: '#03045e', color: '#03045e' }}>
-          {loading ? <CircularProgress size={16} /> : 'Rafraîchir'}
+          {loading ? <CircularProgress size={16} /> : 'Refresh'}
         </Button>
       </Stack>
       <Typography variant="body2" color="#888">
-        Enregistrements immuables sur le Hedera Consensus Service liés à votre wallet.
+        Immutable records on Hedera Consensus Service linked to your wallet.
       </Typography>
 
       {loading && <CircularProgress sx={{ alignSelf: 'center' }} />}
 
       {!loading && messages.length === 0 && (
-        <Alert severity="info">Aucun événement enregistré pour votre wallet.</Alert>
+        <Alert severity="info">No events recorded for your wallet.</Alert>
       )}
 
       {messages.map((msg, i) => {
@@ -434,7 +434,7 @@ function HistorySection({ accountId }) {
                 <Typography variant="body2" fontWeight={700} color="#03045e">{label}</Typography>
                 <Typography variant="caption" color="#888">{ts}</Typography>
               </Stack>
-              {/* Données publiques (hors label) */}
+              {/* Public data (excluding label) */}
               {Object.keys(pub).filter(k => k !== 'label').length > 0 && (
                 <Stack direction="row" spacing={2} flexWrap="wrap">
                   {Object.entries(pub).filter(([k]) => k !== 'label').map(([k, v]) => (
@@ -479,10 +479,10 @@ export default function Investor() {
   if (!accountId) {
     return (
       <Stack alignItems="center" justifyContent="center" minHeight="60vh" spacing={2}>
-        <Typography variant="h5" fontWeight={700} color="#03045e">Interface Investisseur</Typography>
-        <Typography color="#666">Connectez votre wallet MetaMask ou WalletConnect pour accéder à vos titres.</Typography>
+        <Typography variant="h5" fontWeight={700} color="#03045e">Investor Interface</Typography>
+        <Typography color="#666">Connect your MetaMask or WalletConnect wallet to access your T-Bills.</Typography>
         <Alert severity="info" sx={{ maxWidth: 480 }}>
-          Utilisez le bouton <b>Connecter Wallet</b> dans la barre de navigation.
+          Use the <b>Connect Wallet</b> button in the navigation bar.
         </Alert>
       </Stack>
     );
@@ -491,22 +491,22 @@ export default function Investor() {
   return (
     <Stack spacing={4}>
       <Box>
-        <Typography variant="h5" fontWeight={700} color="#03045e">Interface Investisseur</Typography>
+        <Typography variant="h5" fontWeight={700} color="#03045e">Investor Interface</Typography>
         <Typography variant="body2" color="#888">
-          Wallet connecté : <b>{accountId}</b>
+          Connected wallet: <b>{accountId}</b>
         </Typography>
       </Box>
 
       {wrongNetwork && (
         <Alert severity="error">
-          ⚠️ Mauvais réseau — connectez MetaMask au réseau <b>Hedera Testnet</b> (RPC : <code>https://testnet.hashio.io/api</code>, Chain ID : <b>296</b>, Symbol : <b>HBAR</b>).
+          ⚠️ Wrong network — connect MetaMask to <b>Hedera Testnet</b> (RPC: <code>https://testnet.hashio.io/api</code>, Chain ID: <b>296</b>, Symbol: <b>HBAR</b>).
         </Alert>
       )}
 
       <Box sx={{ borderBottom: 1, borderColor: '#e0e0e0' }}>
         <Tabs value={tab} onChange={(_, v) => setTab(v)}
           TabIndicatorProps={{ style: { backgroundColor: '#03045e' } }}>
-          {['Mes titres', 'Portefeuille', 'Historique HCS'].map((l, i) => (
+          {['My T-Bills', 'Portfolio', 'HCS History'].map((l, i) => (
             <Tab key={i} label={l} sx={{ fontWeight: 600, color: tab === i ? '#03045e' : '#666' }} />
           ))}
         </Tabs>

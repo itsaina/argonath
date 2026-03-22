@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
-  DialogContent, DialogTitle, Divider, Paper, Stack, Tab, Tabs,
-  TextField, Typography, Badge,
+  DialogContent, DialogTitle, Divider, Paper, Stack,
+  TextField, Typography,
 } from "@mui/material";
 import { AccountId } from "@hashgraph/sdk";
 import { useWalletInterface } from "../services/wallets/useWalletInterface";
@@ -25,11 +25,10 @@ function toEvmAddress(accountId) {
 }
 
 function formatMGA(wMgaUnits) {
-  return (Number(wMgaUnits) / 1e6).toLocaleString('fr-FR', { minimumFractionDigits: 2 }) + ' wMGA';
+  return (Number(wMgaUnits) / 1e6).toLocaleString('en-US', { minimumFractionDigits: 2 }) + ' wMGA';
 }
 
 /* global BigInt */
-// Estimation du remboursement (même formule ACT/365 que le contrat)
 function estimateRepay(cashAmount, rateBps, durationSeconds) {
   try {
     const c = BigInt(String(cashAmount));
@@ -40,7 +39,7 @@ function estimateRepay(cashAmount, rateBps, durationSeconds) {
   } catch { return null; }
 }
 
-const GRACE_MS = 24 * 3600 * 1000; // 24h en millisecondes — correspond à GRACE_PERIOD du contrat
+const GRACE_MS = 24 * 3600 * 1000;
 
 function getProvider() {
   return new ethers.providers.JsonRpcProvider(
@@ -48,18 +47,8 @@ function getProvider() {
   );
 }
 
-/**
- * Approuve le HTS token ARGN pour le spender.
- *
- * MetaMask : utilise window.ethereum.request directement (même pattern que associateToken
- *            dans Investor.jsx — seule méthode qui fonctionne avec Hedera + MetaMask).
- *            Appel au HTS Precompile 0x167 : approve(token, spender, amount)
- *
- * WalletConnect : utilise walletInterface.executeContractFunction via Hedera SDK.
- */
 async function approveARGN(walletInterface, evmAccount, spender, amount) {
   if (evmAccount && window.ethereum) {
-    // MetaMask — window.ethereum.request identique à associateToken dans Investor.jsx
     const iface = new ethers.utils.Interface([
       'function approve(address token, address spender, uint256 amount) returns (int64)'
     ]);
@@ -70,17 +59,14 @@ async function approveARGN(walletInterface, evmAccount, spender, amount) {
     ]);
     const txHash = await window.ethereum.request({
       method: 'eth_sendTransaction',
-      // 0xF4240 = 1 000 000 gas — HTS precompile approve needs > 300k on Hedera testnet
       params: [{ from: evmAccount, to: HTS_PRECOMPILE, data, gas: '0xF4240' }],
     });
-    // Attendre la confirmation
     if (txHash) {
       const provider = new ethers.providers.Web3Provider(window.ethereum);
       await provider.waitForTransaction(txHash);
     }
     return txHash;
   } else {
-    // WalletConnect — Hedera SDK
     const params = new ContractFunctionParameterBuilder()
       .addParam({ type: 'address', name: 'token',   value: CONTRACT_ADDRESSES.BondToken })
       .addParam({ type: 'address', name: 'spender', value: spender })
@@ -90,22 +76,27 @@ async function approveARGN(walletInterface, evmAccount, spender, amount) {
 }
 
 const STATUS_CHIP = {
-  Open:      { label: 'Ouvert',    bg: '#e3f2fd', color: '#1565c0' },
-  Active:    { label: 'Actif',     bg: '#fff3e0', color: '#e65100' },
-  Repaid:    { label: 'Remboursé', bg: '#e8f5e9', color: '#2e7d32' },
-  Defaulted: { label: 'Défaut',    bg: '#ffebee', color: '#b71c1c' },
-  Cancelled: { label: 'Annulé',    bg: '#f5f5f5', color: '#9e9e9e' },
-  Archived:  { label: 'Archivé',   bg: '#f3e5f5', color: '#6a1b9a' },
+  Open:        { label: 'Open',        bg: '#e3f2fd', color: '#1565c0' },
+  Active:      { label: 'Active',      bg: '#fff3e0', color: '#e65100' },
+  MarginCalled:{ label: 'Margin Call', bg: '#fff8e1', color: '#f57f17' },
+  Repaid:      { label: 'Repaid',      bg: '#e8f5e9', color: '#2e7d32' },
+  Defaulted:   { label: 'Defaulted',   bg: '#ffebee', color: '#b71c1c' },
+  Cancelled:   { label: 'Cancelled',   bg: '#f5f5f5', color: '#9e9e9e' },
+  Archived:    { label: 'Archived',    bg: '#f3e5f5', color: '#6a1b9a' },
+};
+
+const TYPE_CHIP = {
+  offer:   { label: 'Lending Offer',  bg: '#e8f5e9', color: '#2e7d32' },
+  request: { label: 'Borrow Request', bg: '#fff3e0', color: '#e65100' },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MODE A — LENDING OFFER
+// MODE A — LENDING OFFER CARD
 // ═══════════════════════════════════════════════════════════════════════════
 
 function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
   const [loading, setLoading] = useState('');
   const [txStatus, setTxStatus] = useState('');
-  const [showAcceptForm, setShowAcceptForm] = useState(false);
 
   const statusLabel = REPO_STATUS[Number(offer.status)] || 'Open';
   const chip = STATUS_CHIP[statusLabel] || STATUS_CHIP.Open;
@@ -114,9 +105,13 @@ function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
   const borrowerAddr = offer.borrower?.toLowerCase();
 
   const maturityDate = Number(offer.maturity) > 0 ? new Date(Number(offer.maturity) * 1000) : null;
-  // Le défaut n'est possible qu'après maturity + 24h de grâce
-  const isDefaultable = maturityDate && Date.now() > maturityDate.getTime() + GRACE_MS && statusLabel === 'Active';
-  const isInGrace = maturityDate && Date.now() > maturityDate.getTime() && !isDefaultable && statusLabel === 'Active';
+  const marginDeadline = Number(offer.marginCallDeadline) > 0 ? new Date(Number(offer.marginCallDeadline) * 1000) : null;
+  // Le lender peut trigger le margin call dès que le repo est matured (statut Active)
+  const canTriggerMarginCall = statusLabel === 'Active' && maturityDate && Date.now() >= maturityDate.getTime();
+  // Le lender peut claim default uniquement après MarginCalled + deadline expiré
+  const isDefaultable = statusLabel === 'MarginCalled' && marginDeadline && Date.now() > marginDeadline.getTime();
+  // Alerte "deadline bientôt" si en MarginCalled et deadline pas encore passée
+  const isInMarginGrace = statusLabel === 'MarginCalled' && marginDeadline && Date.now() <= marginDeadline.getTime();
   const isLender = evmAccount && evmAccount === lenderAddr;
   const isBorrower = evmAccount && evmAccount === borrowerAddr;
 
@@ -126,19 +121,17 @@ function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
     ? Math.ceil(cashAmt * 10000 / ((10000 - haircut) * 1e6))
     : 0;
 
-  // Estimation remboursement
   const repayEstimate = statusLabel === 'Active'
     ? estimateRepay(offer.cashAmount, offer.repoRateBps, offer.durationSeconds)
     : null;
 
   const execTx = async (action) => {
-    if (!accountId) return alert("Connectez votre wallet.");
+    if (!accountId) return alert("Connect your wallet first.");
     setLoading(action); setTxStatus('');
     try {
       let txHash;
 
       if (action === 'accept') {
-        // bondMaturityTimestamp lu depuis BondMetadata on-chain — aucun param à saisir
         await approveARGN(walletInterface, evmAccount, CONTRACT_ADDRESSES.RepoEscrow, collateralReq);
         const acceptParams = new ContractFunctionParameterBuilder()
           .addParam({ type: 'uint256', name: 'offerId', value: offerId });
@@ -161,7 +154,16 @@ function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
           CONTRACT_ADDRESSES.RepoEscrow, 'repay', repayParams, 300_000
         );
 
+      } else if (action === 'triggerMarginCall') {
+        // Le lender déclenche le margin call après maturité → status MarginCalled
+        const mcParams = new ContractFunctionParameterBuilder()
+          .addParam({ type: 'uint256', name: 'offerId', value: offerId });
+        txHash = await walletInterface.executeContractFunction(
+          CONTRACT_ADDRESSES.RepoEscrow, 'triggerMarginCall', mcParams, 200_000
+        );
+
       } else if (action === 'default') {
+        // Uniquement possible après triggerMarginCall + deadline expiré
         const defParams = new ContractFunctionParameterBuilder()
           .addParam({ type: 'uint256', name: 'offerId', value: offerId });
         txHash = await walletInterface.executeContractFunction(
@@ -178,15 +180,13 @@ function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
 
       setTxStatus(txHash ? 'success' : 'error');
       if (txHash) {
-        // Notarisation HCS (non bloquante)
         const eventMap = {
-          accept:  'repo_offer_accepted',
-          repay:   'repo_repaid',
-          default: 'repo_default_claimed',
-          cancel:  'repo_offer_cancelled',
+          accept: 'repo_offer_accepted', repay: 'repo_repaid',
+          triggerMarginCall: 'repo_margin_call_triggered',
+          default: 'repo_default_claimed', cancel: 'repo_offer_cancelled',
         };
         notifyHCS(eventMap[action] || action, evmAccount, {
-          public: { offerId: Number(offerId), label: `Offre #${offerId} — ${eventMap[action] || action}` },
+          public: { offerId: Number(offerId), label: `Offer #${offerId} — ${eventMap[action] || action}` },
         });
         setTimeout(onRefresh, 2500);
       }
@@ -197,100 +197,111 @@ function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
   };
 
   return (
-    <Paper elevation={0} sx={{ border: '1.5px solid #e0e0e0', borderRadius: 3, p: 3 }}>
-      <Stack spacing={2}>
-        <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-          <Stack spacing={0.5}>
-            <Stack direction="row" spacing={1} alignItems="center">
-              <Typography fontWeight={700} color="#03045e">Offre #{offerId}</Typography>
-              <Chip label={chip.label} size="small"
-                sx={{ backgroundColor: chip.bg, color: chip.color, fontWeight: 600 }} />
-            </Stack>
-            <Typography variant="body2" color="#666">
-              Prêteur : <b>{offer.lender?.slice(0, 10)}…</b>
-              {borrowerAddr && borrowerAddr !== '0x0000000000000000000000000000000000000000' && (
-                <> · Emprunteur : <b>{offer.borrower?.slice(0, 10)}…</b></>
-              )}
-            </Typography>
+    <Paper elevation={0} sx={{ border: '1.5px solid #e0e0e0', borderRadius: 2, p: 2.5 }}>
+      <Stack spacing={1.5}>
+        {/* Header row */}
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Chip label={TYPE_CHIP.offer.label} size="small"
+              sx={{ backgroundColor: TYPE_CHIP.offer.bg, color: TYPE_CHIP.offer.color, fontWeight: 700, fontSize: '0.7rem' }} />
+            <Typography fontWeight={700} color="#03045e" variant="body2">#{offerId}</Typography>
+            <Chip label={chip.label} size="small"
+              sx={{ backgroundColor: chip.bg, color: chip.color, fontWeight: 600, fontSize: '0.7rem' }} />
           </Stack>
-          <Stack alignItems="flex-end">
-            <Typography variant="h6" fontWeight={700} color="#03045e">{formatMGA(offer.cashAmount)}</Typography>
-            <Typography variant="caption" color="#888">liquidité proposée</Typography>
-          </Stack>
+          <Typography variant="h6" fontWeight={700} color="#03045e">{formatMGA(offer.cashAmount)}</Typography>
         </Stack>
 
+        {/* Details row */}
         <Stack direction="row" spacing={3} flexWrap="wrap">
+          <Box>
+            <Typography variant="caption" color="#888">Term</Typography>
+            <Typography variant="body2" fontWeight={600}>{(Number(offer.durationSeconds) / 86400).toFixed(0)} days</Typography>
+          </Box>
+          <Box>
+            <Typography variant="caption" color="#888">Repo Rate</Typography>
+            <Typography variant="body2" fontWeight={600}>{(Number(offer.repoRateBps) / 100).toFixed(2)} %/yr</Typography>
+          </Box>
           <Box>
             <Typography variant="caption" color="#888">Haircut</Typography>
             <Typography variant="body2" fontWeight={600}>{(haircut / 100).toFixed(0)} %</Typography>
           </Box>
-          <Box>
-            <Typography variant="caption" color="#888">Taux repo</Typography>
-            <Typography variant="body2" fontWeight={600}>{(Number(offer.repoRateBps) / 100).toFixed(2)} %/an</Typography>
-          </Box>
-          <Box>
-            <Typography variant="caption" color="#888">Durée</Typography>
-            <Typography variant="body2" fontWeight={600}>{(Number(offer.durationSeconds) / 86400).toFixed(0)} jours</Typography>
-          </Box>
           {statusLabel === 'Open' && (
             <Box>
-              <Typography variant="caption" color="#888">Collatéral ARGN requis</Typography>
+              <Typography variant="caption" color="#888">ARGN Collateral Required</Typography>
               <Typography variant="body2" fontWeight={600}>{collateralReq.toLocaleString()} ARGN</Typography>
             </Box>
           )}
           {statusLabel === 'Active' && (
             <>
               <Box>
-                <Typography variant="caption" color="#888">Collatéral bloqué</Typography>
+                <Typography variant="caption" color="#888">Locked Collateral</Typography>
                 <Typography variant="body2" fontWeight={600}>{Number(offer.collateralAmount).toLocaleString()} ARGN</Typography>
               </Box>
               <Box>
-                <Typography variant="caption" color="#888">Échéance</Typography>
-                <Typography variant="body2" fontWeight={600}>{maturityDate?.toLocaleDateString('fr-FR')}</Typography>
+                <Typography variant="caption" color="#888">Maturity</Typography>
+                <Typography variant="body2" fontWeight={600}>{maturityDate?.toLocaleDateString('en-US')}</Typography>
               </Box>
+              {repayEstimate && (
+                <Box>
+                  <Typography variant="caption" color="#888">Est. Repayment</Typography>
+                  <Typography variant="body2" fontWeight={600} color="#e65100">{formatMGA(repayEstimate)}</Typography>
+                </Box>
+              )}
             </>
+          )}
+          <Box>
+            <Typography variant="caption" color="#888">Lender</Typography>
+            <Typography variant="body2" fontWeight={600} sx={{ fontFamily: 'monospace', fontSize: '0.78rem' }}>{offer.lender?.slice(0, 10)}…</Typography>
+          </Box>
+          {borrowerAddr && borrowerAddr !== '0x0000000000000000000000000000000000000000' && (
+            <Box>
+              <Typography variant="caption" color="#888">Borrower</Typography>
+              <Typography variant="body2" fontWeight={600} sx={{ fontFamily: 'monospace', fontSize: '0.78rem' }}>{offer.borrower?.slice(0, 10)}…</Typography>
+            </Box>
           )}
         </Stack>
 
-        {repayEstimate && (
-          <Alert severity="info" sx={{ py: 0, fontSize: '0.8rem' }}>
-            Remboursement estimé : <b>{formatMGA(repayEstimate)}</b> (capital + intérêts ACT/365)
-          </Alert>
-        )}
-        {isInGrace && (
+        {isInMarginGrace && (
           <Alert severity="warning" sx={{ py: 0, fontSize: '0.8rem' }}>
-            ⏳ Délai de grâce actif — le prêteur peut réclamer le défaut dans moins de 24h. Remboursez dès que possible.
+            ⚠️ Margin Call — repay before {marginDeadline?.toLocaleTimeString()} or lender claims collateral.
           </Alert>
         )}
+        {txStatus === 'success' && <Alert severity="success" sx={{ py: 0 }}>Transaction sent ✓</Alert>}
+        {txStatus === 'error'   && <Alert severity="error"   sx={{ py: 0 }}>Transaction failed</Alert>}
 
-        {txStatus === 'success' && <Alert severity="success" sx={{ py: 0 }}>Transaction envoyée ✓</Alert>}
-        {txStatus === 'error'   && <Alert severity="error"   sx={{ py: 0 }}>Échec de la transaction</Alert>}
-
+        {/* Actions */}
         <Stack direction="row" spacing={1} flexWrap="wrap">
           {statusLabel === 'Open' && !isLender && accountId && (
             <Button variant="contained" size="small" disabled={!!loading}
               onClick={() => execTx('accept')}
               sx={{ backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' } }}>
-              {loading === 'accept' ? <CircularProgress size={16} color="inherit" /> : 'Accepter (DvP)'}
+              {loading === 'accept' ? <CircularProgress size={16} color="inherit" /> : 'Accept (DvP)'}
             </Button>
           )}
           {statusLabel === 'Open' && isLender && (
             <Button variant="outlined" size="small" color="error" disabled={!!loading}
               onClick={() => execTx('cancel')}>
-              {loading === 'cancel' ? <CircularProgress size={16} color="inherit" /> : "Annuler l'offre"}
+              {loading === 'cancel' ? <CircularProgress size={16} color="inherit" /> : 'Cancel Offer'}
             </Button>
           )}
-          {statusLabel === 'Active' && isBorrower && (
+          {(statusLabel === 'Active' || statusLabel === 'MarginCalled') && isBorrower && (
             <Button variant="outlined" size="small" disabled={!!loading}
               onClick={() => execTx('repay')}
               sx={{ borderColor: '#03045e', color: '#03045e' }}>
-              {loading === 'repay' ? <CircularProgress size={16} color="inherit" /> : 'Rembourser'}
+              {loading === 'repay' ? <CircularProgress size={16} color="inherit" /> : 'Repay'}
+            </Button>
+          )}
+          {canTriggerMarginCall && isLender && (
+            <Button variant="outlined" size="small" color="warning" disabled={!!loading}
+              onClick={() => execTx('triggerMarginCall')}
+              sx={{ borderColor: '#f57f17', color: '#f57f17' }}>
+              {loading === 'triggerMarginCall' ? <CircularProgress size={16} color="inherit" /> : 'Trigger Margin Call'}
             </Button>
           )}
           {isDefaultable && isLender && (
             <Button variant="outlined" size="small" color="error" disabled={!!loading}
               onClick={() => execTx('default')}>
-              {loading === 'default' ? <CircularProgress size={16} color="inherit" /> : 'Réclamer défaut'}
+              {loading === 'default' ? <CircularProgress size={16} color="inherit" /> : 'Claim Default'}
             </Button>
           )}
         </Stack>
@@ -298,6 +309,10 @@ function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
     </Paper>
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CREATE LENDING OFFER FORM
+// ═══════════════════════════════════════════════════════════════════════════
 
 function CreateLendingOfferSection({ accountId, walletInterface, onCreated }) {
   const [form, setForm] = useState({ cashMGA: '', repoRate: '8', haircut: '10', durationDays: '7' });
@@ -315,7 +330,7 @@ function CreateLendingOfferSection({ accountId, walletInterface, onCreated }) {
 
   const handleCreate = async (e) => {
     e.preventDefault();
-    if (!accountId) return alert("Connectez votre wallet d'abord.");
+    if (!accountId) return alert("Connect your wallet first.");
     setLoading(true); setStatus('');
     try {
       const cashAmount   = ethers.utils.parseUnits(form.cashMGA, 6).toString();
@@ -325,7 +340,6 @@ function CreateLendingOfferSection({ accountId, walletInterface, onCreated }) {
 
       if (repoRateBps <= 0) { setStatus('rate_zero'); setLoading(false); return; }
 
-      // Vérification balance wMGA
       const evmAddr = toEvmAddress(accountId);
       if (evmAddr) {
         const mockCash = new ethers.Contract(CONTRACT_ADDRESSES.MockCash, MOCK_CASH_ABI, getProvider());
@@ -356,10 +370,8 @@ function CreateLendingOfferSection({ accountId, walletInterface, onCreated }) {
       if (txHash) {
         const evmAddr = toEvmAddress(accountId);
         notifyHCS('repo_lending_offer_created', evmAddr, {
-          public: { cashMGA: Number(form.cashMGA), repoRate: Number(form.repoRate), haircut: Number(form.haircut), durationDays: Number(form.durationDays), label: 'Offre de liquidité créée' },
+          public: { cashMGA: Number(form.cashMGA), repoRate: Number(form.repoRate), haircut: Number(form.haircut), durationDays: Number(form.durationDays), label: 'Lending offer created' },
         });
-        // Récupère le nouvel offerId (= offerCount - 1) et persiste en DB
-        // Attend 4s pour que Hedera confirme avant de lire offerCount
         try {
           await new Promise(r => setTimeout(r, 4000));
           const provider = getProvider();
@@ -367,12 +379,8 @@ function CreateLendingOfferSection({ accountId, walletInterface, onCreated }) {
           const count = Number(await contract.offerCount());
           const offerId = count - 1;
           await saveRepoOffer({
-            offerId,
-            lender: evmAddr,
-            cashAmount: Number(cashAmount),
-            repoRateBps: repoRateBps,
-            haircutBps: haircutBps,
-            durationSec: durationSecs,
+            offerId, lender: evmAddr, cashAmount: Number(cashAmount),
+            repoRateBps, haircutBps, durationSec: durationSecs,
             contractAddr: CONTRACT_ADDRESSES.RepoEscrow,
           });
         } catch {}
@@ -385,39 +393,39 @@ function CreateLendingOfferSection({ accountId, walletInterface, onCreated }) {
   };
 
   return (
-    <Paper elevation={0} sx={{ border: '1.5px solid #e0e0e0', borderRadius: 3, p: 3, maxWidth: 520 }}>
-      <Typography variant="h6" fontWeight={700} color="#03045e" mb={2}>Proposer de la liquidité</Typography>
-      {!hasContracts && <Alert severity="warning" sx={{ mb: 2 }}>Contrats non déployés.</Alert>}
-      {status === 'success'           && <Alert severity="success" sx={{ mb: 2 }}>Offre publiée — wMGA bloqués en escrow.</Alert>}
-      {status === 'error'             && <Alert severity="error"   sx={{ mb: 2 }}>Échec — vérifiez votre balance wMGA.</Alert>}
-      {status === 'insufficient_cash' && <Alert severity="error"  sx={{ mb: 2 }}>Balance wMGA insuffisante pour cette offre.</Alert>}
-      {status === 'rate_zero'         && <Alert severity="error"   sx={{ mb: 2 }}>Le taux repo doit être supérieur à 0 %.</Alert>}
+    <Paper elevation={0} sx={{ border: '1.5px solid #e0e0e0', borderRadius: 3, p: 3 }}>
+      <Typography variant="subtitle1" fontWeight={700} color="#2e7d32" mb={2}>💰 Post a Lending Offer</Typography>
+      {!hasContracts && <Alert severity="warning" sx={{ mb: 2 }}>Contracts not deployed.</Alert>}
+      {status === 'success'           && <Alert severity="success" sx={{ mb: 2 }}>Offer published — wMGA locked in escrow.</Alert>}
+      {status === 'error'             && <Alert severity="error"   sx={{ mb: 2 }}>Failed — check your wMGA balance.</Alert>}
+      {status === 'insufficient_cash' && <Alert severity="error"   sx={{ mb: 2 }}>Insufficient wMGA balance for this offer.</Alert>}
+      {status === 'rate_zero'         && <Alert severity="error"   sx={{ mb: 2 }}>Repo rate must be greater than 0%.</Alert>}
 
       <form onSubmit={handleCreate}>
-        <Stack spacing={2.5}>
+        <Stack spacing={2}>
           <Stack direction="row" spacing={2}>
-            <TextField name="cashMGA" label="Montant à prêter (MGA)" type="number"
+            <TextField name="cashMGA" label="Amount to lend (MGA)" type="number"
               value={form.cashMGA} onChange={handleChange} fullWidth required disabled={!hasContracts}
               InputProps={{ inputProps: { min: 1, step: '0.01' } }}
-              helperText="Sera converti en wMGA (× 1e6)" />
+              helperText="Converted to wMGA (× 1e6)" />
             <TextField name="haircut" label="Haircut (%)" type="number"
               value={form.haircut} onChange={handleChange} fullWidth disabled={!hasContracts}
               InputProps={{ inputProps: { min: 0, max: 99, step: '0.5' } }}
-              helperText={`Collatéral requis : ${collateralPreview.toLocaleString()} ARGN`} />
+              helperText={`Collateral required: ${collateralPreview.toLocaleString()} ARGN`} />
           </Stack>
           <Stack direction="row" spacing={2}>
-            <TextField name="repoRate" label="Taux repo (% /an)" type="number"
+            <TextField name="repoRate" label="Repo rate (%/yr)" type="number"
               value={form.repoRate} onChange={handleChange} fullWidth disabled={!hasContracts}
               InputProps={{ inputProps: { min: 0.01, step: '0.1' } }} />
-            <TextField name="durationDays" label="Durée (jours)" type="number"
+            <TextField name="durationDays" label="Duration (days)" type="number"
               value={form.durationDays} onChange={handleChange} fullWidth disabled={!hasContracts}
               InputProps={{ inputProps: { min: 1 } }} />
           </Stack>
           <Button type="submit" variant="contained" disabled={loading || !hasContracts || !accountId}
-            sx={{ backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' } }}>
-            {loading ? <CircularProgress size={20} color="inherit" /> : "Publier l'offre (bloquer wMGA)"}
+            sx={{ backgroundColor: '#2e7d32', '&:hover': { backgroundColor: '#1b5e20' } }}>
+            {loading ? <CircularProgress size={20} color="inherit" /> : 'Publish Offer (lock wMGA)'}
           </Button>
-          {!accountId && <Alert severity="info" sx={{ py: 0 }}>Connectez votre wallet pour proposer.</Alert>}
+          {!accountId && <Alert severity="info" sx={{ py: 0 }}>Connect your wallet to post an offer.</Alert>}
         </Stack>
       </form>
     </Paper>
@@ -428,7 +436,6 @@ function CreateLendingOfferSection({ accountId, walletInterface, onCreated }) {
 // MODE B — BORROW REQUEST
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Dialog — prêteur soumet une proposition
 function ProposalDialog({ open, onClose, request, requestId, lenderAddress, onSubmitted }) {
   const [form, setForm] = useState({ cashMGA: '', ratePct: '' });
   const [loading, setLoading] = useState(false);
@@ -442,58 +449,51 @@ function ProposalDialog({ open, onClose, request, requestId, lenderAddress, onSu
     setErr('');
     const rateBps = Math.round(Number(form.ratePct) * 100);
     if (rateBps > Number(request?.maxRateBps)) {
-      setErr(`Taux trop élevé — maximum accepté : ${maxRatePct} %`); return;
+      setErr(`Rate too high — max accepted: ${maxRatePct}%`); return;
     }
     const cashAmount = Math.round(Number(form.cashMGA) * 1e6);
     if (cashAmount < Number(request?.desiredCash)) {
-      setErr(`Montant insuffisant — minimum demandé : ${desiredMGA} wMGA`); return;
+      setErr(`Amount too low — minimum: ${desiredMGA} wMGA`); return;
     }
     setLoading(true);
     try {
-      await submitProposal(
-        requestId,
-        lenderAddress,
-        cashAmount,
-        rateBps,
-        Number(request.durationSeconds)
-      );
-      onSubmitted();
-      onClose();
+      await submitProposal(requestId, lenderAddress, cashAmount, rateBps, Number(request.durationSeconds));
+      onSubmitted(); onClose();
       setForm({ cashMGA: '', ratePct: '' });
     } catch (e2) {
-      setErr(e2.message || 'Erreur');
+      setErr(e2.message || 'Error');
     }
     setLoading(false);
   };
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
-      <DialogTitle sx={{ fontWeight: 700, color: '#03045e' }}>Faire une proposition</DialogTitle>
+      <DialogTitle sx={{ fontWeight: 700, color: '#03045e' }}>Submit a Proposal</DialogTitle>
       <form onSubmit={handleSubmit}>
         <DialogContent>
           <Stack spacing={2}>
             {request && (
               <Alert severity="info" sx={{ py: 0 }}>
-                Demande #{requestId} — {request.collateralLocked?.toLocaleString()} ARGN en collatéral<br />
-                Souhaite ≥ {desiredMGA} wMGA · Taux max {maxRatePct} % · {(Number(request.durationSeconds)/86400).toFixed(0)} j
+                Request #{requestId} — {request.collateralLocked?.toLocaleString()} ARGN collateral<br />
+                Wants ≥ {desiredMGA} wMGA · Max rate {maxRatePct}% · {(Number(request.durationSeconds)/86400).toFixed(0)} days
               </Alert>
             )}
             {err && <Alert severity="error" sx={{ py: 0 }}>{err}</Alert>}
-            <TextField label="Montant wMGA à prêter (MGA)" type="number" value={form.cashMGA}
+            <TextField label="Amount to lend (MGA)" type="number" value={form.cashMGA}
               onChange={e => setForm(f => ({ ...f, cashMGA: e.target.value }))}
               required fullWidth InputProps={{ inputProps: { min: 0, step: '0.01' } }}
-              helperText={`Minimum : ${desiredMGA} MGA`} />
-            <TextField label="Taux repo (% /an)" type="number" value={form.ratePct}
+              helperText={`Minimum: ${desiredMGA} MGA`} />
+            <TextField label="Repo rate (%/yr)" type="number" value={form.ratePct}
               onChange={e => setForm(f => ({ ...f, ratePct: e.target.value }))}
               required fullWidth InputProps={{ inputProps: { min: 0, step: '0.01' } }}
-              helperText={`Maximum accepté : ${maxRatePct} %`} />
+              helperText={`Maximum accepted: ${maxRatePct}%`} />
           </Stack>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={onClose} disabled={loading}>Annuler</Button>
+          <Button onClick={onClose} disabled={loading}>Cancel</Button>
           <Button type="submit" variant="contained" disabled={loading}
             sx={{ backgroundColor: '#03045e' }}>
-            {loading ? <CircularProgress size={18} color="inherit" /> : 'Soumettre la proposition'}
+            {loading ? <CircularProgress size={18} color="inherit" /> : 'Submit Proposal'}
           </Button>
         </DialogActions>
       </form>
@@ -501,7 +501,6 @@ function ProposalDialog({ open, onClose, request, requestId, lenderAddress, onSu
   );
 }
 
-// Panel — emprunteur voit les propositions reçues + prêteur confirme son financement
 function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface, request, onFunded }) {
   const [proposals, setProposals] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -521,7 +520,17 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
   const handleAccept = async (proposal) => {
     setActionId(proposal.id);
     try {
+      // 1. Accepter dans la DB off-chain
       await acceptProposal(proposal.id);
+      // 2. Whitelist le prêteur on-chain (protège contre front-running sur fundRequest)
+      if (walletInterface && CONTRACT_ADDRESSES.RepoEscrow) {
+        const acceptLenderParams = new ContractFunctionParameterBuilder()
+          .addParam({ type: 'uint256', name: 'requestId', value: requestId })
+          .addParam({ type: 'address', name: 'lender',    value: proposal.lender_address });
+        await walletInterface.executeContractFunction(
+          CONTRACT_ADDRESSES.RepoEscrow, 'setAcceptedLender', acceptLenderParams, 150_000
+        );
+      }
       await load();
     } catch (e) { alert(e.message); }
     setActionId('');
@@ -534,7 +543,6 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
     setActionId('');
   };
 
-  // Prêteur confirme le financement après que sa proposition a été acceptée
   const handleFund = async (proposal) => {
     if (!proposal || !walletInterface) return;
     setFundStatus('loading');
@@ -542,14 +550,12 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
       const actualCash    = proposal.cash_amount;
       const actualRateBps = proposal.rate_bps;
 
-      // 1. Approve wMGA → RepoEscrow (MockCash = ERC-20 classique, pas HTS)
       const approveParams = new ContractFunctionParameterBuilder()
         .addParam({ type: 'address', name: 'spender', value: CONTRACT_ADDRESSES.RepoEscrow })
         .addParam({ type: 'uint256', name: 'amount',  value: Math.round(actualCash) });
       await walletInterface.executeContractFunction(
         CONTRACT_ADDRESSES.MockCash, 'approve', approveParams, 80_000
       );
-      // 2. fundRequest
       const fundParams = new ContractFunctionParameterBuilder()
         .addParam({ type: 'uint256', name: 'requestId',     value: requestId })
         .addParam({ type: 'uint256', name: 'actualCash',    value: Math.round(actualCash) })
@@ -560,7 +566,7 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
       setFundStatus(txHash ? 'success' : 'error');
       if (txHash) {
         notifyHCS('repo_request_funded', currentEvmAddr, {
-          public: { requestId: Number(requestId), actualCash: actualCash, actualRateBps, label: 'Demande de liquidité financée' },
+          public: { requestId: Number(requestId), actualCash, actualRateBps, label: 'Borrow request funded' },
         });
         setTimeout(() => { onFunded(); setFundStatus(''); }, 2000);
       }
@@ -571,7 +577,6 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
 
   const pending  = proposals.filter(p => p.status === 'pending');
   const accepted = proposals.find(p => p.status === 'accepted');
-  // Est-ce le prêteur dont la proposition a été acceptée ?
   const isMyAcceptedProposal = accepted && currentEvmAddr &&
     accepted.lender_address?.toLowerCase() === currentEvmAddr.toLowerCase();
 
@@ -580,41 +585,38 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
   return (
     <Stack spacing={1.5}>
       <Typography variant="subtitle2" color="#666" fontWeight={600}>
-        Propositions reçues ({proposals.length})
+        Proposals received ({proposals.length})
       </Typography>
 
-      {/* Emprunteur — proposition acceptée, en attente du prêteur */}
       {accepted && !isMyAcceptedProposal && (
         <Alert severity="success" sx={{ py: 0 }}>
-          Proposition acceptée : {(accepted.cash_amount / 1e6).toFixed(2)} wMGA à {(accepted.rate_bps / 100).toFixed(2)} %/an<br />
-          <b>En attente du prêteur ({accepted.lender_address?.slice(0, 10)}…) pour confirmer le financement.</b>
+          Proposal accepted: {(accepted.cash_amount / 1e6).toFixed(2)} wMGA at {(accepted.rate_bps / 100).toFixed(2)} %/yr<br />
+          <b>Waiting for lender ({accepted.lender_address?.slice(0, 10)}…) to confirm funding.</b>
         </Alert>
       )}
 
-      {/* Prêteur — sa proposition a été acceptée, il doit confirmer le financement */}
       {isMyAcceptedProposal && (
         <Paper elevation={0} sx={{ border: '1.5px solid #4caf50', borderRadius: 2, p: 2 }}>
           <Stack spacing={1}>
-            <Typography fontWeight={600} color="#2e7d32">Votre proposition a été acceptée !</Typography>
+            <Typography fontWeight={600} color="#2e7d32">Your proposal was accepted!</Typography>
             <Typography variant="body2">
-              {(accepted.cash_amount / 1e6).toFixed(2)} wMGA · {(accepted.rate_bps / 100).toFixed(2)} %/an
+              {(accepted.cash_amount / 1e6).toFixed(2)} wMGA · {(accepted.rate_bps / 100).toFixed(2)} %/yr
             </Typography>
-            {fundStatus === 'success' && <Alert severity="success" sx={{ py: 0 }}>Financement confirmé ✓</Alert>}
-            {fundStatus === 'error'   && <Alert severity="error"   sx={{ py: 0 }}>Échec du financement</Alert>}
+            {fundStatus === 'success' && <Alert severity="success" sx={{ py: 0 }}>Funding confirmed ✓</Alert>}
+            {fundStatus === 'error'   && <Alert severity="error"   sx={{ py: 0 }}>Funding failed</Alert>}
             <Button variant="contained" size="small" disabled={fundStatus === 'loading' || fundStatus === 'success'}
               onClick={() => handleFund(accepted)}
               sx={{ backgroundColor: '#2e7d32', alignSelf: 'flex-start' }}>
-              {fundStatus === 'loading' ? <CircularProgress size={16} color="inherit" /> : 'Confirmer le financement (approve + fundRequest)'}
+              {fundStatus === 'loading' ? <CircularProgress size={16} color="inherit" /> : 'Confirm Funding (approve + fundRequest)'}
             </Button>
           </Stack>
         </Paper>
       )}
 
       {pending.length === 0 && !accepted && (
-        <Typography variant="body2" color="#aaa">Aucune proposition en attente.</Typography>
+        <Typography variant="body2" color="#aaa">No pending proposals.</Typography>
       )}
 
-      {/* Propositions en attente — boutons Accepter/Refuser uniquement pour l'emprunteur */}
       {pending.map(p => {
         const isBorrowerView = currentEvmAddr &&
           borrowerAddress?.toLowerCase() === currentEvmAddr.toLowerCase();
@@ -623,10 +625,10 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
             <Stack direction="row" justifyContent="space-between" alignItems="center">
               <Stack>
                 <Typography variant="body2" fontWeight={600}>
-                  {(p.cash_amount / 1e6).toFixed(2)} wMGA · {(p.rate_bps / 100).toFixed(2)} %/an
+                  {(p.cash_amount / 1e6).toFixed(2)} wMGA · {(p.rate_bps / 100).toFixed(2)} %/yr
                 </Typography>
                 <Typography variant="caption" color="#888">
-                  Prêteur : {p.lender_address?.slice(0, 10)}… · {(p.duration_sec / 86400).toFixed(0)} j
+                  Lender: {p.lender_address?.slice(0, 10)}… · {(p.duration_sec / 86400).toFixed(0)} days
                 </Typography>
               </Stack>
               {isBorrowerView && (
@@ -634,12 +636,11 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
                   <Button size="small" variant="contained" disabled={!!actionId}
                     onClick={() => handleAccept(p)}
                     sx={{ backgroundColor: '#03045e', fontSize: '0.72rem' }}>
-                    {actionId === p.id ? <CircularProgress size={14} color="inherit" /> : 'Accepter'}
+                    {actionId === p.id ? <CircularProgress size={14} color="inherit" /> : 'Accept'}
                   </Button>
                   <Button size="small" variant="outlined" color="error" disabled={!!actionId}
-                    onClick={() => handleReject(p.id)}
-                    sx={{ fontSize: '0.72rem' }}>
-                    Refuser
+                    onClick={() => handleReject(p.id)} sx={{ fontSize: '0.72rem' }}>
+                    Reject
                   </Button>
                 </Stack>
               )}
@@ -649,13 +650,12 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
       })}
 
       <Button size="small" variant="text" onClick={load} sx={{ alignSelf: 'flex-start', color: '#666' }}>
-        ↻ Rafraîchir les propositions
+        ↻ Refresh proposals
       </Button>
     </Stack>
   );
 }
 
-// Card — Borrow Request
 function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefresh }) {
   const [loading, setLoading] = useState('');
   const [txStatus, setTxStatus] = useState('');
@@ -671,17 +671,17 @@ function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefre
   const isBorrower = evmAccount && evmAccount === borrowerAddr;
   const isLender   = evmAccount && evmAccount === lenderAddr;
   const maturityDate = Number(req.maturity) > 0 ? new Date(Number(req.maturity) * 1000) : null;
-  // Défaut possible uniquement après maturity + 24h de grâce
-  const isDefaultable = maturityDate && Date.now() > maturityDate.getTime() + GRACE_MS && statusLabel === 'Active';
-  const isInGrace = maturityDate && Date.now() > maturityDate.getTime() && !isDefaultable && statusLabel === 'Active';
+  const marginDeadline = Number(req.marginCallDeadline) > 0 ? new Date(Number(req.marginCallDeadline) * 1000) : null;
+  const canTriggerMarginCall = statusLabel === 'Active' && maturityDate && Date.now() >= maturityDate.getTime();
+  const isDefaultable = statusLabel === 'MarginCalled' && marginDeadline && Date.now() > marginDeadline.getTime();
+  const isInMarginGrace = statusLabel === 'MarginCalled' && marginDeadline && Date.now() <= marginDeadline.getTime();
 
-  // Estimation remboursement (affiché avant la signature)
   const repayEstimate = statusLabel === 'Active'
     ? estimateRepay(req.actualCash, req.actualRateBps, req.durationSeconds)
     : null;
 
   const execTx = async (action) => {
-    if (!accountId) return alert("Connectez votre wallet.");
+    if (!accountId) return alert("Connect your wallet first.");
     setLoading(action); setTxStatus('');
     try {
       let txHash;
@@ -708,6 +708,13 @@ function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefre
           CONTRACT_ADDRESSES.RepoEscrow, 'repayRequest', repayParams, 300_000
         );
 
+      } else if (action === 'triggerMarginCall') {
+        const params = new ContractFunctionParameterBuilder()
+          .addParam({ type: 'uint256', name: 'requestId', value: requestId });
+        txHash = await walletInterface.executeContractFunction(
+          CONTRACT_ADDRESSES.RepoEscrow, 'triggerMarginCallRequest', params, 200_000
+        );
+
       } else if (action === 'default') {
         const params = new ContractFunctionParameterBuilder()
           .addParam({ type: 'uint256', name: 'requestId', value: requestId });
@@ -719,12 +726,12 @@ function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefre
       setTxStatus(txHash ? 'success' : 'error');
       if (txHash) {
         const eventMap = {
-          cancel:  'repo_request_cancelled',
-          repay:   'repo_repaid',
+          cancel: 'repo_request_cancelled', repay: 'repo_repaid',
+          triggerMarginCall: 'repo_margin_call_triggered',
           default: 'repo_default_claimed',
         };
         notifyHCS(eventMap[action] || action, evmAccount, {
-          public: { requestId: Number(requestId), label: `Demande #${requestId} — ${eventMap[action] || action}` },
+          public: { requestId: Number(requestId), label: `Request #${requestId} — ${eventMap[action] || action}` },
         });
         setTimeout(onRefresh, 2500);
       }
@@ -735,78 +742,80 @@ function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefre
   };
 
   return (
-    <Paper elevation={0} sx={{ border: '1.5px solid #e0e0e0', borderRadius: 3, p: 3 }}>
-      <Stack spacing={2}>
-        {/* En-tête */}
-        <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-          <Stack spacing={0.5}>
-            <Stack direction="row" spacing={1} alignItems="center">
-              <Typography fontWeight={700} color="#03045e">Demande #{requestId}</Typography>
-              <Chip label={chip.label} size="small"
-                sx={{ backgroundColor: chip.bg, color: chip.color, fontWeight: 600 }} />
-            </Stack>
-            <Typography variant="body2" color="#666">
-              Emprunteur : <b>{req.borrower?.slice(0, 10)}…</b>
-              {lenderAddr && lenderAddr !== '0x0000000000000000000000000000000000000000' && (
-                <> · Prêteur : <b>{req.lender?.slice(0, 10)}…</b></>
-              )}
-            </Typography>
+    <Paper elevation={0} sx={{ border: '1.5px solid #e0e0e0', borderRadius: 2, p: 2.5 }}>
+      <Stack spacing={1.5}>
+        {/* Header row */}
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Chip label={TYPE_CHIP.request.label} size="small"
+              sx={{ backgroundColor: TYPE_CHIP.request.bg, color: TYPE_CHIP.request.color, fontWeight: 700, fontSize: '0.7rem' }} />
+            <Typography fontWeight={700} color="#03045e" variant="body2">#{requestId}</Typography>
+            <Chip label={chip.label} size="small"
+              sx={{ backgroundColor: chip.bg, color: chip.color, fontWeight: 600, fontSize: '0.7rem' }} />
           </Stack>
           <Stack alignItems="flex-end">
             <Typography variant="h6" fontWeight={700} color="#03045e">
               {Number(req.collateralLocked).toLocaleString()} ARGN
             </Typography>
-            <Typography variant="caption" color="#888">collatéral bloqué</Typography>
+            <Typography variant="caption" color="#888">collateral locked</Typography>
           </Stack>
         </Stack>
 
-        {/* Termes */}
+        {/* Details row */}
         <Stack direction="row" spacing={3} flexWrap="wrap">
           <Box>
-            <Typography variant="caption" color="#888">wMGA souhaités</Typography>
+            <Typography variant="caption" color="#888">Term</Typography>
+            <Typography variant="body2" fontWeight={600}>{(Number(req.durationSeconds) / 86400).toFixed(0)} days</Typography>
+          </Box>
+          <Box>
+            <Typography variant="caption" color="#888">Max Rate</Typography>
+            <Typography variant="body2" fontWeight={600}>{(Number(req.maxRateBps) / 100).toFixed(2)} %/yr</Typography>
+          </Box>
+          <Box>
+            <Typography variant="caption" color="#888">Desired Cash</Typography>
             <Typography variant="body2" fontWeight={600}>{formatMGA(req.desiredCash)}</Typography>
-          </Box>
-          <Box>
-            <Typography variant="caption" color="#888">Taux max</Typography>
-            <Typography variant="body2" fontWeight={600}>{(Number(req.maxRateBps) / 100).toFixed(2)} %/an</Typography>
-          </Box>
-          <Box>
-            <Typography variant="caption" color="#888">Durée</Typography>
-            <Typography variant="body2" fontWeight={600}>{(Number(req.durationSeconds) / 86400).toFixed(0)} jours</Typography>
           </Box>
           {statusLabel === 'Active' && (
             <>
               <Box>
-                <Typography variant="caption" color="#888">Taux réel</Typography>
-                <Typography variant="body2" fontWeight={600}>{(Number(req.actualRateBps) / 100).toFixed(2)} %/an</Typography>
+                <Typography variant="caption" color="#888">Actual Rate</Typography>
+                <Typography variant="body2" fontWeight={600}>{(Number(req.actualRateBps) / 100).toFixed(2)} %/yr</Typography>
               </Box>
               <Box>
-                <Typography variant="caption" color="#888">Montant reçu</Typography>
+                <Typography variant="caption" color="#888">Cash Received</Typography>
                 <Typography variant="body2" fontWeight={600}>{formatMGA(req.actualCash)}</Typography>
               </Box>
               <Box>
-                <Typography variant="caption" color="#888">Échéance</Typography>
-                <Typography variant="body2" fontWeight={600}>{maturityDate?.toLocaleDateString('fr-FR')}</Typography>
+                <Typography variant="caption" color="#888">Maturity</Typography>
+                <Typography variant="body2" fontWeight={600}>{maturityDate?.toLocaleDateString('en-US')}</Typography>
               </Box>
               {repayEstimate && (
                 <Box>
-                  <Typography variant="caption" color="#888">Remboursement estimé</Typography>
+                  <Typography variant="caption" color="#888">Est. Repayment</Typography>
                   <Typography variant="body2" fontWeight={600} color="#e65100">{formatMGA(repayEstimate)}</Typography>
                 </Box>
               )}
             </>
           )}
+          <Box>
+            <Typography variant="caption" color="#888">Borrower</Typography>
+            <Typography variant="body2" fontWeight={600} sx={{ fontFamily: 'monospace', fontSize: '0.78rem' }}>{req.borrower?.slice(0, 10)}…</Typography>
+          </Box>
+          {lenderAddr && lenderAddr !== '0x0000000000000000000000000000000000000000' && (
+            <Box>
+              <Typography variant="caption" color="#888">Lender</Typography>
+              <Typography variant="body2" fontWeight={600} sx={{ fontFamily: 'monospace', fontSize: '0.78rem' }}>{req.lender?.slice(0, 10)}…</Typography>
+            </Box>
+          )}
         </Stack>
 
-        {isInGrace && (
-          <Alert severity="warning" sx={{ py: 0 }}>
-            Période de grâce — le prêteur peut réclamer le défaut dans {
-              Math.ceil((maturityDate.getTime() + GRACE_MS - Date.now()) / 3600000)
-            }h si non remboursé.
+        {isInMarginGrace && (
+          <Alert severity="warning" sx={{ py: 0, fontSize: '0.8rem' }}>
+            ⚠️ Margin Call — repay before {marginDeadline?.toLocaleTimeString()} or lender claims collateral.
           </Alert>
         )}
-        {txStatus === 'success' && <Alert severity="success" sx={{ py: 0 }}>Transaction envoyée ✓</Alert>}
-        {txStatus === 'error'   && <Alert severity="error"   sx={{ py: 0 }}>Échec de la transaction</Alert>}
+        {txStatus === 'success' && <Alert severity="success" sx={{ py: 0 }}>Transaction sent ✓</Alert>}
+        {txStatus === 'error'   && <Alert severity="error"   sx={{ py: 0 }}>Transaction failed</Alert>}
 
         {/* Actions */}
         <Stack direction="row" spacing={1} flexWrap="wrap">
@@ -814,41 +823,44 @@ function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefre
             <Button variant="contained" size="small" disabled={!!loading}
               onClick={() => setShowProposalDialog(true)}
               sx={{ backgroundColor: '#1565c0', '&:hover': { backgroundColor: '#0d47a1' } }}>
-              Faire une proposition
+              Make a Proposal
             </Button>
           )}
           {statusLabel === 'Open' && isBorrower && (
             <Button variant="outlined" size="small" color="error" disabled={!!loading}
               onClick={() => execTx('cancel')}>
-              {loading === 'cancel' ? <CircularProgress size={16} color="inherit" /> : 'Annuler la demande'}
+              {loading === 'cancel' ? <CircularProgress size={16} color="inherit" /> : 'Cancel Request'}
             </Button>
           )}
-          {statusLabel === 'Active' && isBorrower && (
+          {(statusLabel === 'Active' || statusLabel === 'MarginCalled') && isBorrower && (
             <Button variant="outlined" size="small" disabled={!!loading}
               onClick={() => execTx('repay')}
               sx={{ borderColor: '#03045e', color: '#03045e' }}>
-              {loading === 'repay' ? <CircularProgress size={16} color="inherit" /> : 'Rembourser'}
+              {loading === 'repay' ? <CircularProgress size={16} color="inherit" /> : 'Repay'}
+            </Button>
+          )}
+          {canTriggerMarginCall && isLender && (
+            <Button variant="outlined" size="small" color="warning" disabled={!!loading}
+              onClick={() => execTx('triggerMarginCall')}
+              sx={{ borderColor: '#f57f17', color: '#f57f17' }}>
+              {loading === 'triggerMarginCall' ? <CircularProgress size={16} color="inherit" /> : 'Trigger Margin Call'}
             </Button>
           )}
           {isDefaultable && isLender && (
             <Button variant="outlined" size="small" color="error" disabled={!!loading}
               onClick={() => execTx('default')}>
-              {loading === 'default' ? <CircularProgress size={16} color="inherit" /> : 'Réclamer défaut'}
+              {loading === 'default' ? <CircularProgress size={16} color="inherit" /> : 'Claim Default'}
             </Button>
           )}
         </Stack>
 
-        {/* Propositions — visible si demande ouverte + (c'est l'emprunteur OU prêteur avec proposition acceptée) */}
         {statusLabel === 'Open' && (isBorrower || isLender) && (
           <>
             <Divider />
             <ProposalsPanel
-              requestId={requestId}
-              borrowerAddress={borrowerAddr}
-              accountId={accountId}
-              walletInterface={walletInterface}
-              request={req}
-              onFunded={() => { onRefresh(); }}
+              requestId={requestId} borrowerAddress={borrowerAddr}
+              accountId={accountId} walletInterface={walletInterface}
+              request={req} onFunded={() => { onRefresh(); }}
               key={proposalRefresh}
             />
           </>
@@ -856,10 +868,8 @@ function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefre
       </Stack>
 
       <ProposalDialog
-        open={showProposalDialog}
-        onClose={() => setShowProposalDialog(false)}
-        request={req}
-        requestId={requestId}
+        open={showProposalDialog} onClose={() => setShowProposalDialog(false)}
+        request={req} requestId={requestId}
         lenderAddress={toEvmAddress(accountId) || ''}
         onSubmitted={() => setProposalRefresh(n => n + 1)}
       />
@@ -877,7 +887,7 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
 
   const handleCreate = async (e) => {
     e.preventDefault();
-    if (!accountId) return alert("Connectez votre wallet d'abord.");
+    if (!accountId) return alert("Connect your wallet first.");
     setLoading(true); setStatus('');
     try {
       const collateralAmount = Math.round(Number(form.collateral));
@@ -887,7 +897,6 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
 
       if (maxRateBps <= 0) { setStatus('rate_zero'); setLoading(false); return; }
 
-      // Vérification balance ARGN
       const evmAddr = toEvmAddress(accountId);
       if (evmAddr) {
         const bondTokenContract = new ethers.Contract(CONTRACT_ADDRESSES.BondToken, BOND_TOKEN_ABI, getProvider());
@@ -897,11 +906,9 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
         }
       }
 
-      // 1. Approve ARGN → RepoEscrow
       const approveTx = await approveARGN(walletInterface, evmAddr, CONTRACT_ADDRESSES.RepoEscrow, collateralAmount);
       if (!approveTx) { setStatus('error'); setLoading(false); return; }
 
-      // 2. Créer la demande — bondMaturityTimestamp lu depuis BondMetadata on-chain (plus de param)
       const reqParams = new ContractFunctionParameterBuilder()
         .addParam({ type: 'uint256', name: 'collateralAmount', value: collateralAmount })
         .addParam({ type: 'uint256', name: 'desiredCash',      value: desiredCash })
@@ -915,7 +922,7 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
       setStatus(txHash ? 'success' : 'error');
       if (txHash) {
         notifyHCS('repo_borrow_request_created', evmAddr, {
-          public: { collateral: collateralAmount, desiredMGA: form.desiredMGA, maxRate: form.maxRate, durationDays: form.durationDays, label: 'Demande de liquidité créée' },
+          public: { collateral: collateralAmount, desiredMGA: form.desiredMGA, maxRate: form.maxRate, durationDays: form.durationDays, label: 'Borrow request created' },
         });
         try {
           await new Promise(r => setTimeout(r, 4000));
@@ -924,14 +931,9 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
           const count = Number(await contract.requestCount());
           const requestId = count - 1;
           await saveRepoRequest({
-            requestId,
-            borrower: evmAddr,
-            collateralAmount,
-            desiredCash: Number(desiredCash),
-            maxRateBps,
-            durationSec: durationSecs,
-            bondMaturityDate: '',
-            contractAddr: CONTRACT_ADDRESSES.RepoEscrow,
+            requestId, borrower: evmAddr, collateralAmount,
+            desiredCash: Number(desiredCash), maxRateBps, durationSec: durationSecs,
+            bondMaturityDate: '', contractAddr: CONTRACT_ADDRESSES.RepoEscrow,
           });
         } catch {}
         setForm({ collateral: '', desiredMGA: '', maxRate: '8', durationDays: '7' }); onCreated();
@@ -943,40 +945,40 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
   };
 
   return (
-    <Paper elevation={0} sx={{ border: '1.5px solid #e0e0e0', borderRadius: 3, p: 3, maxWidth: 520 }}>
-      <Typography variant="h6" fontWeight={700} color="#03045e" mb={0.5}>Créer une demande de liquidité</Typography>
+    <Paper elevation={0} sx={{ border: '1.5px solid #e0e0e0', borderRadius: 3, p: 3 }}>
+      <Typography variant="subtitle1" fontWeight={700} color="#1565c0" mb={0.5}>📋 Post a Borrow Request</Typography>
       <Typography variant="body2" color="#888" mb={2}>
-        Bloquez votre ARGN en collatéral. Les prêteurs vous feront des propositions.
+        Lock your ARGN as collateral. Lenders will submit proposals.
       </Typography>
-      {!hasContracts && <Alert severity="warning" sx={{ mb: 2 }}>Contrats non déployés.</Alert>}
-      {status === 'success'           && <Alert severity="success" sx={{ mb: 2 }}>Demande publiée — ARGN bloqués en escrow.</Alert>}
-      {status === 'error'             && <Alert severity="error"   sx={{ mb: 2 }}>Échec — vérifiez votre balance ARGN.</Alert>}
-      {status === 'insufficient_argn' && <Alert severity="error"   sx={{ mb: 2 }}>Balance ARGN insuffisante pour ce collatéral.</Alert>}
-      {status === 'rate_zero'         && <Alert severity="error"   sx={{ mb: 2 }}>Le taux max doit être supérieur à 0 %.</Alert>}
+      {!hasContracts && <Alert severity="warning" sx={{ mb: 2 }}>Contracts not deployed.</Alert>}
+      {status === 'success'           && <Alert severity="success" sx={{ mb: 2 }}>Request published — ARGN locked in escrow.</Alert>}
+      {status === 'error'             && <Alert severity="error"   sx={{ mb: 2 }}>Failed — check your ARGN balance.</Alert>}
+      {status === 'insufficient_argn' && <Alert severity="error"   sx={{ mb: 2 }}>Insufficient ARGN balance for this collateral.</Alert>}
+      {status === 'rate_zero'         && <Alert severity="error"   sx={{ mb: 2 }}>Max rate must be greater than 0%.</Alert>}
       <form onSubmit={handleCreate}>
-        <Stack spacing={2.5}>
+        <Stack spacing={2}>
           <Stack direction="row" spacing={2}>
-            <TextField name="collateral" label="Collatéral ARGN à bloquer" type="number"
+            <TextField name="collateral" label="ARGN Collateral to lock" type="number"
               value={form.collateral} onChange={handleChange} fullWidth required disabled={!hasContracts}
               InputProps={{ inputProps: { min: 1, step: 1 } }} />
-            <TextField name="desiredMGA" label="Liquidité souhaitée (MGA)" type="number"
+            <TextField name="desiredMGA" label="Desired liquidity (MGA)" type="number"
               value={form.desiredMGA} onChange={handleChange} fullWidth required disabled={!hasContracts}
               InputProps={{ inputProps: { min: 1, step: '0.01' } }}
-              helperText="Sera converti en wMGA (× 1e6)" />
+              helperText="Converted to wMGA (× 1e6)" />
           </Stack>
           <Stack direction="row" spacing={2}>
-            <TextField name="maxRate" label="Taux max accepté (% /an)" type="number"
+            <TextField name="maxRate" label="Max rate accepted (%/yr)" type="number"
               value={form.maxRate} onChange={handleChange} fullWidth disabled={!hasContracts}
               InputProps={{ inputProps: { min: 0.01, step: '0.1' } }} />
-            <TextField name="durationDays" label="Durée (jours)" type="number"
+            <TextField name="durationDays" label="Duration (days)" type="number"
               value={form.durationDays} onChange={handleChange} fullWidth disabled={!hasContracts}
               InputProps={{ inputProps: { min: 1 } }} />
           </Stack>
           <Button type="submit" variant="contained" disabled={loading || !hasContracts || !accountId}
             sx={{ backgroundColor: '#1565c0', '&:hover': { backgroundColor: '#0d47a1' } }}>
-            {loading ? <CircularProgress size={20} color="inherit" /> : 'Publier la demande (bloquer ARGN)'}
+            {loading ? <CircularProgress size={20} color="inherit" /> : 'Publish Request (lock ARGN)'}
           </Button>
-          {!accountId && <Alert severity="info" sx={{ py: 0 }}>Connectez votre wallet pour créer une demande.</Alert>}
+          {!accountId && <Alert severity="info" sx={{ py: 0 }}>Connect your wallet to post a request.</Alert>}
         </Stack>
       </form>
     </Paper>
@@ -984,119 +986,33 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// FAUCET wMGA
-// ═══════════════════════════════════════════════════════════════════════════
-
-function FaucetSection({ accountId, walletInterface }) {
-  const [amount, setAmount]     = useState('10000');
-  const [loading, setLoading]   = useState(false);
-  const [status, setStatus]     = useState('');
-  const [balance, setBalance]   = useState(null);
-  const [txHash, setTxHash]     = useState('');
-  const evmAddr = toEvmAddress(accountId);
-
-  const loadBalance = useCallback(async () => {
-    if (!evmAddr || !CONTRACT_ADDRESSES.MockCash) return;
-    try {
-      const contract = new ethers.Contract(CONTRACT_ADDRESSES.MockCash, MOCK_CASH_ABI, getProvider());
-      const bal = await contract.balanceOf(evmAddr);
-      setBalance((Number(bal) / 1e6).toLocaleString('fr-FR', { minimumFractionDigits: 2 }));
-    } catch {}
-  }, [evmAddr]);
-
-  useEffect(() => { loadBalance(); }, [loadBalance]);
-
-  const handleMint = async () => {
-    if (!accountId) return alert("Connectez votre wallet.");
-    if (!amount || Number(amount) <= 0) return;
-    setLoading(true); setStatus(''); setTxHash('');
-    try {
-      const units = ethers.utils.parseUnits(amount, 6).toString();
-      const params = new ContractFunctionParameterBuilder()
-        .addParam({ type: 'address', name: 'to',     value: evmAddr })
-        .addParam({ type: 'uint256', name: 'amount', value: units });
-      const hash = await walletInterface.executeContractFunction(
-        CONTRACT_ADDRESSES.MockCash, 'mint', params, 80_000
-      );
-      if (hash) {
-        setTxHash(hash);
-        setStatus('success');
-        // Hedera testnet peut prendre 5-10s pour confirmer
-        setTimeout(loadBalance, 5000);
-        setTimeout(loadBalance, 10000);
-      } else {
-        setStatus('error');
-      }
-    } catch (err) {
-      console.error(err); setStatus('error');
-    }
-    setLoading(false);
-  };
-
-  return (
-    <Paper elevation={0} sx={{ border: '1.5px solid #e3f2fd', borderRadius: 3, p: 2.5, bgcolor: '#f8fbff' }}>
-      <Stack direction="row" alignItems="center" spacing={1} mb={1}>
-        <Typography variant="subtitle1" fontWeight={700} color="#1565c0">Faucet wMGA</Typography>
-        {balance !== null && (
-          <Chip label={`Solde : ${balance} wMGA`} size="small" sx={{ bgcolor: '#e3f2fd', color: '#1565c0', fontWeight: 600 }} />
-        )}
-        <Button size="small" variant="text" onClick={loadBalance} sx={{ color: '#888', minWidth: 0, p: 0.5, fontSize: '1rem' }} title="Rafraîchir le solde">↻</Button>
-      </Stack>
-      <Stack direction="row" spacing={1} alignItems="center">
-        <TextField
-          size="small" type="number" label="Montant (MGA)" value={amount}
-          onChange={e => setAmount(e.target.value)}
-          sx={{ width: 180 }}
-          inputProps={{ min: 1, step: 1000 }}
-        />
-        <Button variant="contained" size="small" disabled={loading || !accountId}
-          onClick={handleMint}
-          sx={{ backgroundColor: '#1565c0', '&:hover': { backgroundColor: '#0d47a1' }, whiteSpace: 'nowrap' }}>
-          {loading ? <CircularProgress size={16} color="inherit" /> : '💧 Obtenir wMGA'}
-        </Button>
-        {txHash && (
-          <Button size="small" variant="text" href={`${process.env.REACT_APP_HASHSCAN_URL || 'https://hashscan.io/testnet/transaction/'}${txHash}`} target="_blank" sx={{ fontSize: '0.72rem' }}>
-            HashScan ↗
-          </Button>
-        )}
-      </Stack>
-      {status === 'success' && <Alert severity="success" sx={{ mt: 1, py: 0 }}>+{Number(amount).toLocaleString('fr-FR')} wMGA mintés ✓</Alert>}
-      {status === 'error'   && <Alert severity="error"   sx={{ mt: 1, py: 0 }}>Échec du mint wMGA</Alert>}
-    </Paper>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PAGE MARKET
+// PAGE MARKET — Unified list
 // ═══════════════════════════════════════════════════════════════════════════
 
 export default function Market() {
   const { accountId, walletInterface } = useWalletInterface();
-  const [tab, setTab] = useState(0);
   const [offers, setOffers] = useState([]);
   const [requests, setRequests] = useState([]);
   const [loadingOffers, setLoadingOffers] = useState(false);
   const [loadingRequests, setLoadingRequests] = useState(false);
-  const [filterOffers, setFilterOffers] = useState('all');
-  const [filterReqs, setFilterReqs] = useState('all');
+  const [filterType, setFilterType] = useState('all');     // all | offers | requests
+  const [filterStatus, setFilterStatus] = useState('all'); // all | open | active
+  const [showCreate, setShowCreate] = useState(false);
   const hasContracts = !!CONTRACT_ADDRESSES.RepoEscrow;
 
   const loadOffers = useCallback(async () => {
     setLoadingOffers(true);
     try {
-      // 1. Récupère la liste persistée en DB (historique complet)
       const dbOffers = await fetchRepoOffers();
-      // 2. Si le contrat courant est déployé, enrichit avec statut on-chain
       if (hasContracts && dbOffers.length > 0) {
         const provider = getProvider();
         const contract = new ethers.Contract(CONTRACT_ADDRESSES.RepoEscrow, REPO_ESCROW_ABI, provider);
         const enriched = await Promise.all(dbOffers.map(async (row) => {
           try {
-            const onChain = await contract.offers(row.id);
-            // Si le contrat a changé (redeployé), l'adresse ne correspond plus → statut "Archive"
             if (row.contract_addr && row.contract_addr.toLowerCase() !== CONTRACT_ADDRESSES.RepoEscrow.toLowerCase()) {
               return { ...row, _id: row.id, status: 99, _archived: true };
             }
+            const onChain = await contract.offers(row.id);
             return { ...onChain, _id: row.id };
           } catch {
             return { ...row, _id: row.id, status: 99, _archived: true };
@@ -1104,7 +1020,6 @@ export default function Market() {
         }));
         setOffers(enriched);
       } else if (hasContracts) {
-        // DB vide : lit directement la chaîne
         const provider = getProvider();
         const contract = new ethers.Contract(CONTRACT_ADDRESSES.RepoEscrow, REPO_ESCROW_ABI, provider);
         const count = Number(await contract.offerCount());
@@ -1153,123 +1068,127 @@ export default function Market() {
     setLoadingRequests(false);
   }, [hasContracts]);
 
-  useEffect(() => { loadOffers(); loadRequests(); }, [loadOffers, loadRequests]);
+  const refresh = useCallback(() => { loadOffers(); loadRequests(); }, [loadOffers, loadRequests]);
 
-  const filteredOffers = offers.filter(o => {
-    const s = REPO_STATUS[Number(o.status)];
-    if (filterOffers === 'open')   return s === 'Open';
-    if (filterOffers === 'active') return s === 'Active';
-    return true;
-  });
+  useEffect(() => { refresh(); }, [refresh]);
 
-  const filteredReqs = requests.filter(r => {
-    const s = REPO_STATUS[Number(r.status)];
-    if (filterReqs === 'open')   return s === 'Open';
-    if (filterReqs === 'active') return s === 'Active';
-    return true;
-  });
+  // Unified filtered list
+  const allItems = useMemo(() => {
+    const o = offers.map(item => ({ ...item, _type: 'offer' }));
+    const r = requests.map(item => ({ ...item, _type: 'request' }));
+    return [...o, ...r].filter(item => {
+      const s = REPO_STATUS[Number(item.status)];
+      if (filterType === 'offers' && item._type !== 'offer') return false;
+      if (filterType === 'requests' && item._type !== 'request') return false;
+      if (filterStatus === 'open' && s !== 'Open') return false;
+      if (filterStatus === 'active' && s !== 'Active') return false;
+      if (filterStatus === 'margincall' && s !== 'MarginCalled') return false;
+      return true;
+    });
+  }, [offers, requests, filterType, filterStatus]);
 
-  const openOfferCount   = offers.filter(o => REPO_STATUS[Number(o.status)] === 'Open').length;
-  const openRequestCount = requests.filter(r => REPO_STATUS[Number(r.status)] === 'Open').length;
+  const openCount   = offers.filter(o => REPO_STATUS[Number(o.status)] === 'Open').length
+                    + requests.filter(r => REPO_STATUS[Number(r.status)] === 'Open').length;
+  const activeCount = offers.filter(o => REPO_STATUS[Number(o.status)] === 'Active').length
+                    + requests.filter(r => REPO_STATUS[Number(r.status)] === 'Active').length;
+
+  const isLoading = loadingOffers || loadingRequests;
 
   return (
     <Stack spacing={4}>
-      {/* Titre */}
+      {/* Header */}
       <Stack direction="row" justifyContent="space-between" alignItems="center">
         <Box>
-          <Typography variant="h5" fontWeight={700} color="#03045e">Marché Repo</Typography>
-          <Typography variant="body2" color="#888">
-            Deux côtés : prêteurs publient de la liquidité · emprunteurs publient leurs besoins + attendent des propositions
-          </Typography>
+          <Typography variant="h5" fontWeight={700} color="#03045e">Repo Market</Typography>
+          <Stack direction="row" spacing={2} mt={0.5}>
+            <Typography variant="body2" color="#888">
+              <b style={{ color: '#1565c0' }}>{openCount}</b> open · <b style={{ color: '#e65100' }}>{activeCount}</b> active
+            </Typography>
+          </Stack>
         </Box>
-        <Button variant="outlined" onClick={() => { loadOffers(); loadRequests(); }}
-          disabled={loadingOffers || loadingRequests}
-          sx={{ borderColor: '#03045e', color: '#03045e' }}>
-          {loadingOffers || loadingRequests ? <CircularProgress size={18} /> : 'Rafraîchir'}
-        </Button>
+        <Stack direction="row" spacing={1}>
+          <Button variant="outlined" onClick={refresh} disabled={isLoading}
+            sx={{ borderColor: '#03045e', color: '#03045e' }}>
+            {isLoading ? <CircularProgress size={18} /> : '↻ Refresh'}
+          </Button>
+          <Button variant="contained" onClick={() => setShowCreate(s => !s)}
+            sx={{ backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' } }}>
+            {showCreate ? 'Hide forms' : '+ New Position'}
+          </Button>
+        </Stack>
       </Stack>
 
       {!hasContracts && (
-        <Alert severity="warning">Contrats non déployés. Configurez <code>.env</code>.</Alert>
+        <Alert severity="warning">Contracts not deployed. Configure <code>.env</code>.</Alert>
       )}
 
-      {/* Onglets */}
-      <Tabs value={tab} onChange={(_, v) => setTab(v)}
-        sx={{ borderBottom: '1px solid #e0e0e0', '& .MuiTab-root': { fontWeight: 600 } }}>
-        <Tab label={
-          <Badge badgeContent={openOfferCount} color="primary" sx={{ '& .MuiBadge-badge': { right: -10 } }}>
-            Offres de liquidité
-          </Badge>
-        } />
-        <Tab label={
-          <Badge badgeContent={openRequestCount} color="secondary" sx={{ '& .MuiBadge-badge': { right: -10 } }}>
-            Demandes d'emprunt
-          </Badge>
-        } />
-      </Tabs>
-
-      {/* ── Onglet 0 : Lending Offers ── */}
-      {tab === 0 && (
+      {/* Create forms — collapsible */}
+      {showCreate && (
         <Stack spacing={3}>
-          <FaucetSection accountId={accountId} walletInterface={walletInterface} />
-          <Divider />
-          <CreateLendingOfferSection
-            accountId={accountId} walletInterface={walletInterface} onCreated={loadOffers}
-          />
-          <Divider />
-          <Stack direction="row" spacing={1}>
-            {[['all', 'Toutes'], ['open', 'Ouvertes'], ['active', 'Actives']].map(([val, label]) => (
-              <Button key={val} size="small" variant={filterOffers === val ? 'contained' : 'outlined'}
-                onClick={() => setFilterOffers(val)}
-                sx={filterOffers === val
-                  ? { backgroundColor: '#03045e', color: '#fff' }
-                  : { borderColor: '#ccc', color: '#666' }}>
-                {label}
-              </Button>
-            ))}
+          <Stack direction={{ xs: 'column', md: 'row' }} spacing={3}>
+            <Box flex={1}>
+              <CreateLendingOfferSection accountId={accountId} walletInterface={walletInterface} onCreated={refresh} />
+            </Box>
+            <Box flex={1}>
+              <CreateBorrowRequestSection accountId={accountId} walletInterface={walletInterface} onCreated={refresh} />
+            </Box>
           </Stack>
-          {!accountId && <Alert severity="info">Connectez votre wallet pour accepter des offres.</Alert>}
-          {loadingOffers && <CircularProgress sx={{ alignSelf: 'center' }} />}
-          {!loadingOffers && filteredOffers.length === 0 && hasContracts && (
-            <Alert severity="info">Aucune offre dans cette catégorie.</Alert>
-          )}
-          {filteredOffers.map(offer => (
-            <RepoCard key={offer._id} offer={offer} offerId={offer._id}
-              accountId={accountId} walletInterface={walletInterface} onRefresh={loadOffers} />
-          ))}
+          <Divider />
         </Stack>
       )}
 
-      {/* ── Onglet 1 : Borrow Requests ── */}
-      {tab === 1 && (
-        <Stack spacing={3}>
-          <FaucetSection accountId={accountId} walletInterface={walletInterface} />
-          <Divider />
-          <CreateBorrowRequestSection
-            accountId={accountId} walletInterface={walletInterface} onCreated={loadRequests}
-          />
-          <Divider />
-          <Stack direction="row" spacing={1}>
-            {[['all', 'Toutes'], ['open', 'Ouvertes'], ['active', 'Actives']].map(([val, label]) => (
-              <Button key={val} size="small" variant={filterReqs === val ? 'contained' : 'outlined'}
-                onClick={() => setFilterReqs(val)}
-                sx={filterReqs === val
-                  ? { backgroundColor: '#1565c0', color: '#fff' }
-                  : { borderColor: '#ccc', color: '#666' }}>
-                {label}
-              </Button>
-            ))}
-          </Stack>
-          {!accountId && <Alert severity="info">Connectez votre wallet pour faire des propositions.</Alert>}
-          {loadingRequests && <CircularProgress sx={{ alignSelf: 'center' }} />}
-          {!loadingRequests && filteredReqs.length === 0 && hasContracts && (
-            <Alert severity="info">Aucune demande dans cette catégorie.</Alert>
-          )}
-          {filteredReqs.map(req => (
-            <BorrowRequestCard key={req._id} req={req} requestId={req._id}
-              accountId={accountId} walletInterface={walletInterface} onRefresh={loadRequests} />
+      {/* Filters */}
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }}>
+        {/* Type filter */}
+        <Stack direction="row" spacing={0.5}>
+          {[['all', 'All'], ['offers', 'Lending Offers'], ['requests', 'Borrow Requests']].map(([val, label]) => (
+            <Button key={val} size="small"
+              variant={filterType === val ? 'contained' : 'outlined'}
+              onClick={() => setFilterType(val)}
+              sx={filterType === val
+                ? { backgroundColor: '#03045e', color: '#fff', fontSize: '0.75rem' }
+                : { borderColor: '#ccc', color: '#666', fontSize: '0.75rem' }}>
+              {label}
+            </Button>
           ))}
         </Stack>
+
+        <Divider orientation="vertical" flexItem sx={{ display: { xs: 'none', sm: 'block' } }} />
+
+        {/* Status filter */}
+        <Stack direction="row" spacing={0.5}>
+          {[['all', 'All'], ['open', 'Open'], ['active', 'Active'], ['margincall', 'Margin Call']].map(([val, label]) => (
+            <Button key={val} size="small"
+              variant={filterStatus === val ? 'contained' : 'outlined'}
+              onClick={() => setFilterStatus(val)}
+              sx={filterStatus === val
+                ? { backgroundColor: '#555', color: '#fff', fontSize: '0.75rem' }
+                : { borderColor: '#ccc', color: '#666', fontSize: '0.75rem' }}>
+              {label}
+            </Button>
+          ))}
+        </Stack>
+      </Stack>
+
+      {/* Unified list */}
+      {isLoading && <CircularProgress sx={{ alignSelf: 'center' }} />}
+
+      {!isLoading && allItems.length === 0 && hasContracts && (
+        <Alert severity="info">No items match this filter.</Alert>
+      )}
+
+      {!accountId && (
+        <Alert severity="info">Connect your wallet to accept offers or post positions.</Alert>
+      )}
+
+      {allItems.map(item =>
+        item._type === 'offer' ? (
+          <RepoCard key={`offer-${item._id}`} offer={item} offerId={item._id}
+            accountId={accountId} walletInterface={walletInterface} onRefresh={refresh} />
+        ) : (
+          <BorrowRequestCard key={`req-${item._id}`} req={item} requestId={item._id}
+            accountId={accountId} walletInterface={walletInterface} onRefresh={refresh} />
+        )
       )}
     </Stack>
   );

@@ -6,6 +6,7 @@ const pool = require('../db/pool');
 const { signRedeemAuthorization } = require('../services/signer');
 const { mintAndTransfer } = require('../services/hts');
 const { publishEvent, phoneProof, identityProof, claimProof } = require('../services/hcs');
+const { normalizePhone } = require('../utils/phone');
 
 // ABI minimal pour appeler BondMetadata.setMaturity
 const BOND_METADATA_ABI = [
@@ -44,7 +45,8 @@ function requireDepositary(req, res, next) {
  */
 router.post('/', requireDepositary, async (req, res) => {
   console.log('[POST /claims] body reçu:', JSON.stringify(req.body));
-  const { first_name, last_name, phone, bond_type, nominal_amount, rate, maturity_date, batch_id } = req.body;
+  const { first_name, last_name, bond_type, nominal_amount, rate, maturity_date, batch_id } = req.body;
+  const phone = normalizePhone(req.body.phone);
 
   const required = ['first_name','last_name','phone','bond_type','nominal_amount','rate','maturity_date','batch_id'];
   const missing = required.filter(f => req.body[f] === undefined || req.body[f] === null || String(req.body[f]).trim() === '');
@@ -72,7 +74,7 @@ router.post('/', requireDepositary, async (req, res) => {
       public: {
         bond_type:      bond_type,
         nominal_amount: Number(nominal_amount),
-        label: 'Allocation de titre créée',
+        label: 'T-Bill allocation created',
       },
       depositary: {
         rate:     Number(rate),
@@ -134,7 +136,7 @@ router.patch('/:id/status', requireDepositary, async (req, res) => {
         bond_type:      updated.bond_type,
         nominal_amount: Number(updated.nominal_amount),
         new_status:     status,
-        label: `Statut allocation → ${status}`,
+        label: `Allocation status → ${status}`,
       },
       depositary: {},
     });
@@ -151,7 +153,7 @@ router.patch('/:id/status', requireDepositary, async (req, res) => {
  * Retourne les claims disponibles pour un numéro de téléphone (investisseur).
  */
 router.get('/phone/:phone', async (req, res) => {
-  const { phone } = req.params;
+  const phone = normalizePhone(decodeURIComponent(req.params.phone));
   try {
     const result = await pool.query(
       `SELECT * FROM claims WHERE phone = $1 AND status IN ('available', 'published') ORDER BY created_at DESC`,
@@ -171,7 +173,8 @@ router.get('/phone/:phone', async (req, res) => {
  */
 router.post('/:id/authorize', async (req, res) => {
   const { id } = req.params;
-  const { walletAddress, phone } = req.body;
+  const { walletAddress } = req.body;
+  const phone = normalizePhone(req.body.phone);
 
   if (!walletAddress || !phone) {
     return res.status(400).json({ error: 'walletAddress and phone required' });
@@ -278,7 +281,7 @@ router.post('/:id/confirm-redeem', async (req, res) => {
         public: {
           bond_type:      claim.bond_type,
           nominal_amount: claim.nominal_amount,
-          label: 'Allocation de titres rachetée',
+          label: 'T-Bill allocation redeemed (ARGN minted)',
         },
         depositary: {
           hts_mint_tx: htsResult?.mintTxId,

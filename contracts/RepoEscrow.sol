@@ -14,12 +14,22 @@ interface IBondMetadata {
 ///  A) Lending Offer  : prêteur bloque wMGA + fixe termes → emprunteur accepte (DvP atomique)
 ///  B) Borrow Request : emprunteur bloque ARGN + définit besoins → prêteurs proposent → DvP à confirmation
 ///
+/// Machine d'états :
+///  Open → Active → MarginCalled → Repaid
+///                              ↓
+///                          Defaulted (si deadline expiré)
+///               ↓
+///            Repaid  (si remboursement avant triggerMarginCall)
+///
 /// Règles métier :
-///  - GRACE_PERIOD (24h) : fenêtre après maturity pendant laquelle le borrower peut encore rembourser,
-///    et pendant laquelle le lender NE PEUT PAS encore réclamer le défaut.
+///  - MARGIN_CALL_GRACE (4h) : fenêtre de réponse après un margin call (close-out period).
+///    Pendant cette fenêtre l'emprunteur peut encore rembourser.
+///    Le prêteur ne peut réclamer le défaut qu'après l'expiration.
 ///  - MAX_REPO_DURATION (364 jours) : durée maximale d'une opération repo.
-///  - bondMaturityTimestamp : lu depuis BondMetadata (renseigné par le dépositaire au mint) —
-///    le repo (+ grace period) ne peut pas dépasser la maturité des bonds mis en collatéral.
+///  - bondMaturityTimestamp : lu depuis BondMetadata — le repo (+ MARGIN_CALL_GRACE) ne peut pas
+///    dépasser la maturité des bonds mis en collatéral.
+///  - acceptedLender (Mode B) : whitelist on-chain du prêteur accepté par l'emprunteur,
+///    protège contre le front-running sur fundRequest.
 ///
 /// Hypothèse PoC : 1 ARGN = 1 MGA nominal, wMGA a 6 décimales (1 MGA = 1e6 wMGA units).
 contract RepoEscrow {
@@ -29,22 +39,24 @@ contract RepoEscrow {
     IBondMetadata public bondMetadata; // Registre de maturités — renseigné par le dépositaire
 
     uint256 public constant CASH_DECIMALS     = 1e6;
-    uint256 public constant GRACE_PERIOD      = 24 hours;
+    /// @notice Fenêtre de réponse accordée à l'emprunteur après un margin call (close-out period).
+    uint256 public constant MARGIN_CALL_GRACE = 4 hours;
     uint256 public constant MAX_REPO_DURATION = 364 days;
 
-    enum Status { Open, Active, Repaid, Defaulted, Cancelled }
+    enum Status { Open, Active, MarginCalled, Repaid, Defaulted, Cancelled }
 
     // ─── Mode A : Lending Offer ─────────────────────────────────────────────────
     struct RepoOffer {
         address lender;
-        uint256 cashAmount;           // wMGA bloqués (en unités wMGA)
-        uint256 haircut;              // décote en bps (ex: 1000 = 10%)
-        uint256 repoRateBps;          // taux annualisé en bps
+        uint256 cashAmount;            // wMGA bloqués (en unités wMGA)
+        uint256 haircut;               // décote en bps (ex: 1000 = 10%)
+        uint256 repoRateBps;           // taux annualisé en bps
         uint256 durationSeconds;
         address borrower;
-        uint256 collateralAmount;     // ARGN apportés (0 si Open)
+        uint256 collateralAmount;      // ARGN apportés (0 si Open)
         uint256 maturity;
         uint256 bondMaturityTimestamp; // lu depuis BondMetadata au moment d'accept()
+        uint256 marginCallDeadline;    // timestamp limite réponse margin call (0 si non déclenché)
         Status  status;
     }
 
@@ -63,6 +75,8 @@ contract RepoEscrow {
         uint256 actualCash;            // wMGA reçus lors du financement
         uint256 actualRateBps;         // taux réel convenu
         uint256 maturity;
+        uint256 marginCallDeadline;    // timestamp limite réponse margin call (0 si non déclenché)
+        address acceptedLender;        // prêteur whitelisté off-chain par l'emprunteur (0x0 = ouvert)
         Status  status;
     }
 
@@ -70,15 +84,21 @@ contract RepoEscrow {
     mapping(uint256 => BorrowRequest) public borrowRequests;
 
     // ─── Events ─────────────────────────────────────────────────────────────────
+
+    // Mode A
     event LendingOfferCreated(uint256 indexed offerId, address indexed lender, uint256 cashAmount, uint256 haircut, uint256 repoRateBps, uint256 durationSeconds);
     event OfferAccepted(uint256 indexed offerId, address indexed borrower, uint256 collateralAmount, uint256 maturity, uint256 bondMaturityTimestamp);
     event OfferRepaid(uint256 indexed offerId, uint256 repayAmount);
+    event MarginCallTriggered(uint256 indexed offerId, uint256 deadline);
     event DefaultClaimed(uint256 indexed offerId, address indexed lender);
     event OfferCancelled(uint256 indexed offerId);
 
+    // Mode B
     event BorrowRequestCreated(uint256 indexed requestId, address indexed borrower, uint256 collateralLocked, uint256 desiredCash, uint256 maxRateBps, uint256 durationSeconds, uint256 bondMaturityTimestamp);
+    event LenderAccepted(uint256 indexed requestId, address indexed lender);
     event RequestFunded(uint256 indexed requestId, address indexed lender, uint256 actualCash, uint256 actualRateBps, uint256 maturity);
     event RequestRepaid(uint256 indexed requestId, uint256 repayAmount);
+    event MarginCallTriggeredRequest(uint256 indexed requestId, uint256 deadline);
     event RequestDefaultClaimed(uint256 indexed requestId, address indexed lender);
     event RequestCancelled(uint256 indexed requestId);
 
@@ -129,6 +149,7 @@ contract RepoEscrow {
             collateralAmount:     0,
             maturity:             0,
             bondMaturityTimestamp: 0,
+            marginCallDeadline:   0,
             status:               Status.Open
         });
 
@@ -136,6 +157,7 @@ contract RepoEscrow {
     }
 
     /// @notice Calcule le collatéral ARGN requis pour une offre.
+    ///         Formule : ceil(cashAmount / ((1 - haircut) * CASH_DECIMALS))
     function collateralRequired(uint256 offerId) public view returns (uint256) {
         RepoOffer storage offer = offers[offerId];
         require(offer.cashAmount > 0, "RepoEscrow: offer not found");
@@ -153,7 +175,7 @@ contract RepoEscrow {
         uint256 bondMaturityTs = bondMetadata.getMaturity(msg.sender);
         require(bondMaturityTs > block.timestamp, "RepoEscrow: no valid bond maturity registered");
         require(
-            block.timestamp + offer.durationSeconds + GRACE_PERIOD <= bondMaturityTs,
+            block.timestamp + offer.durationSeconds + MARGIN_CALL_GRACE <= bondMaturityTs,
             "RepoEscrow: repo would outlast bond maturity"
         );
 
@@ -186,12 +208,20 @@ contract RepoEscrow {
     }
 
     /// @notice L'emprunteur rembourse et récupère ses ARGN.
-    ///         Autorisé jusqu'à maturity + GRACE_PERIOD.
+    ///         Autorisé en état Active (avant margin call) ou MarginCalled (avant deadline).
     function repay(uint256 offerId) external {
         RepoOffer storage offer = offers[offerId];
-        require(offer.status == Status.Active,                     "RepoEscrow: offer not active");
-        require(msg.sender == offer.borrower,                      "RepoEscrow: only borrower can repay");
-        require(block.timestamp <= offer.maturity + GRACE_PERIOD,  "RepoEscrow: grace period expired - lender may claim default");
+        require(
+            offer.status == Status.Active || offer.status == Status.MarginCalled,
+            "RepoEscrow: offer not active"
+        );
+        require(msg.sender == offer.borrower, "RepoEscrow: only borrower can repay");
+        if (offer.status == Status.MarginCalled) {
+            require(
+                block.timestamp <= offer.marginCallDeadline,
+                "RepoEscrow: margin call deadline passed"
+            );
+        }
 
         uint256 total = repayAmount(offerId);
 
@@ -208,13 +238,27 @@ contract RepoEscrow {
         emit OfferRepaid(offerId, total);
     }
 
-    /// @notice Le prêteur réclame les ARGN en cas de défaut.
-    ///         Uniquement après maturity + GRACE_PERIOD.
+    /// @notice Le prêteur déclenche un margin call après la maturité du repo.
+    ///         L'emprunteur dispose de MARGIN_CALL_GRACE (4h) pour rembourser.
+    function triggerMarginCall(uint256 offerId) external {
+        RepoOffer storage offer = offers[offerId];
+        require(offer.status == Status.Active,     "RepoEscrow: offer not active");
+        require(msg.sender == offer.lender,        "RepoEscrow: only lender can trigger margin call");
+        require(block.timestamp >= offer.maturity, "RepoEscrow: repo not matured yet");
+
+        offer.status             = Status.MarginCalled;
+        offer.marginCallDeadline = block.timestamp + MARGIN_CALL_GRACE;
+
+        emit MarginCallTriggered(offerId, offer.marginCallDeadline);
+    }
+
+    /// @notice Le prêteur réclame les ARGN après expiration du margin call.
+    ///         Uniquement possible après triggerMarginCall + deadline expiré.
     function claimDefault(uint256 offerId) external {
         RepoOffer storage offer = offers[offerId];
-        require(offer.status == Status.Active,                     "RepoEscrow: offer not active");
-        require(msg.sender == offer.lender,                        "RepoEscrow: only lender can claim default");
-        require(block.timestamp > offer.maturity + GRACE_PERIOD,   "RepoEscrow: grace period still active - wait 24h after maturity");
+        require(offer.status == Status.MarginCalled,        "RepoEscrow: must trigger margin call first");
+        require(msg.sender == offer.lender,                 "RepoEscrow: only lender can claim default");
+        require(block.timestamp > offer.marginCallDeadline, "RepoEscrow: margin call grace still active");
 
         require(
             bondToken.transfer(offer.lender, offer.collateralAmount),
@@ -261,7 +305,7 @@ contract RepoEscrow {
         uint256 bondMaturityTs = bondMetadata.getMaturity(msg.sender);
         require(bondMaturityTs > block.timestamp, "RepoEscrow: no valid bond maturity registered");
         require(
-            block.timestamp + durationSeconds + GRACE_PERIOD <= bondMaturityTs,
+            block.timestamp + durationSeconds + MARGIN_CALL_GRACE <= bondMaturityTs,
             "RepoEscrow: repo would outlast bond maturity"
         );
 
@@ -282,13 +326,30 @@ contract RepoEscrow {
             actualCash:           0,
             actualRateBps:        0,
             maturity:             0,
+            marginCallDeadline:   0,
+            acceptedLender:       address(0),
             status:               Status.Open
         });
 
         emit BorrowRequestCreated(requestId, msg.sender, collateralAmount, desiredCash, maxRateBps, durationSeconds, bondMaturityTs);
     }
 
+    /// @notice L'emprunteur whiteliste un prêteur après accord off-chain.
+    ///         Protège contre le front-running : seul ce prêteur pourra appeler fundRequest.
+    ///         Appelé par le frontend après que le borrower accepte une proposition dans l'UI.
+    function setAcceptedLender(uint256 requestId, address lender) external {
+        BorrowRequest storage req = borrowRequests[requestId];
+        require(req.status == Status.Open,     "RepoEscrow: request not open");
+        require(msg.sender == req.borrower,    "RepoEscrow: only borrower can set accepted lender");
+        require(lender != address(0),          "RepoEscrow: invalid lender address");
+        require(lender != req.borrower,        "RepoEscrow: lender cannot be borrower");
+
+        req.acceptedLender = lender;
+        emit LenderAccepted(requestId, lender);
+    }
+
     /// @notice Le prêteur finance la demande après accord off-chain.
+    ///         Si setAcceptedLender a été appelé, seul ce prêteur peut financer.
     function fundRequest(
         uint256 requestId,
         uint256 actualCash,
@@ -297,6 +358,9 @@ contract RepoEscrow {
         BorrowRequest storage req = borrowRequests[requestId];
         require(req.status == Status.Open,           "RepoEscrow: request not open");
         require(msg.sender != req.borrower,          "RepoEscrow: borrower cannot lend");
+        if (req.acceptedLender != address(0)) {
+            require(msg.sender == req.acceptedLender, "RepoEscrow: lender not accepted by borrower");
+        }
         require(actualCash >= req.desiredCash,       "RepoEscrow: insufficient cash offered");
         require(actualRateBps <= req.maxRateBps,     "RepoEscrow: rate exceeds borrower maximum");
 
@@ -323,11 +387,20 @@ contract RepoEscrow {
     }
 
     /// @notice L'emprunteur rembourse la demande et récupère ses ARGN.
+    ///         Autorisé en état Active (avant margin call) ou MarginCalled (avant deadline).
     function repayRequest(uint256 requestId) external {
         BorrowRequest storage req = borrowRequests[requestId];
-        require(req.status == Status.Active,                     "RepoEscrow: request not active");
-        require(msg.sender == req.borrower,                      "RepoEscrow: only borrower can repay");
-        require(block.timestamp <= req.maturity + GRACE_PERIOD,  "RepoEscrow: grace period expired - lender may claim default");
+        require(
+            req.status == Status.Active || req.status == Status.MarginCalled,
+            "RepoEscrow: request not active"
+        );
+        require(msg.sender == req.borrower, "RepoEscrow: only borrower can repay");
+        if (req.status == Status.MarginCalled) {
+            require(
+                block.timestamp <= req.marginCallDeadline,
+                "RepoEscrow: margin call deadline passed"
+            );
+        }
 
         uint256 total = repayRequestAmount(requestId);
 
@@ -344,12 +417,25 @@ contract RepoEscrow {
         emit RequestRepaid(requestId, total);
     }
 
-    /// @notice Le prêteur réclame les ARGN en cas de défaut sur une demande.
+    /// @notice Le prêteur déclenche un margin call sur une demande après maturité.
+    function triggerMarginCallRequest(uint256 requestId) external {
+        BorrowRequest storage req = borrowRequests[requestId];
+        require(req.status == Status.Active,     "RepoEscrow: request not active");
+        require(msg.sender == req.lender,        "RepoEscrow: only lender can trigger margin call");
+        require(block.timestamp >= req.maturity, "RepoEscrow: repo not matured yet");
+
+        req.status             = Status.MarginCalled;
+        req.marginCallDeadline = block.timestamp + MARGIN_CALL_GRACE;
+
+        emit MarginCallTriggeredRequest(requestId, req.marginCallDeadline);
+    }
+
+    /// @notice Le prêteur réclame les ARGN après expiration du margin call sur une demande.
     function claimDefaultRequest(uint256 requestId) external {
         BorrowRequest storage req = borrowRequests[requestId];
-        require(req.status == Status.Active,                     "RepoEscrow: request not active");
-        require(msg.sender == req.lender,                        "RepoEscrow: only lender can claim default");
-        require(block.timestamp > req.maturity + GRACE_PERIOD,   "RepoEscrow: grace period still active - wait 24h after maturity");
+        require(req.status == Status.MarginCalled,        "RepoEscrow: must trigger margin call first");
+        require(msg.sender == req.lender,                 "RepoEscrow: only lender can claim default");
+        require(block.timestamp > req.marginCallDeadline, "RepoEscrow: margin call grace still active");
 
         require(
             bondToken.transfer(req.lender, req.collateralLocked),

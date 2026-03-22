@@ -120,7 +120,7 @@ router.post('/proposals', async (req, res) => {
         requestId:  Number(requestId),
         cashAmount: Number(cashAmount),
         rateBps:    Number(rateBps),
-        label: 'Proposition de financement soumise',
+        label: 'Funding proposal submitted',
       },
       depositary: { durationSec: Number(durationSec) },
     });
@@ -133,8 +133,10 @@ router.post('/proposals', async (req, res) => {
 });
 
 // PUT /api/repo/proposals/:id/accept
+// Body optionnel : { borrowerAddress } — pour notariser le côté emprunteur
 router.put('/proposals/:id/accept', async (req, res) => {
   const { id } = req.params;
+  const { borrowerAddress } = req.body || {};
   try {
     // Récupérer la proposition pour obtenir le request_id
     const propResult = await pool.query(
@@ -165,19 +167,28 @@ router.put('/proposals/:id/accept', async (req, res) => {
     );
     const accepted = updated.rows[0];
 
-    // Notarisation HCS — non bloquante
+    // Notarisation HCS renforcée — hash des termes pour preuve immuable de l'accord bilatéral
+    // Le hash couvre : requestId + lenderAddress + cashAmount + rateBps + durationSec
+    // Côté vérification : le frontend peut recalculer et comparer avec l'event HCS
+    const termsHash = require('crypto')
+      .createHash('sha256')
+      .update(`${accepted?.request_id}:${accepted?.lender_address}:${accepted?.cash_amount}:${accepted?.rate_bps}:${accepted?.duration_sec}`)
+      .digest('hex');
+
     publishEvent('repo_proposal_accepted', {
-      wallet: accepted?.lender_address?.toLowerCase(),
+      wallet: borrowerAddress?.toLowerCase() || accepted?.lender_address?.toLowerCase(),
       public: {
-        requestId:  accepted?.request_id,
-        cashAmount: accepted?.cash_amount,
-        rateBps:    accepted?.rate_bps,
-        label: 'Proposition de financement acceptée',
+        requestId:    accepted?.request_id,
+        lender:       accepted?.lender_address,
+        cashAmount:   accepted?.cash_amount,
+        rateBps:      accepted?.rate_bps,
+        durationSec:  accepted?.duration_sec,
+        termsHash,    // hash SHA-256 des termes convenus — proof of agreement
+        label: 'Funding proposal accepted',
       },
-      depositary: { durationSec: accepted?.duration_sec },
     });
 
-    res.json({ success: true, proposal: accepted });
+    res.json({ success: true, proposal: accepted, termsHash });
   } catch (err) {
     console.error('[repo/proposals accept]', err);
     res.status(500).json({ error: 'Database error' });

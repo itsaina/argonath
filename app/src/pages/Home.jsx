@@ -2,9 +2,9 @@ import { Box, Button, Chip, Stack, Typography } from "@mui/material";
 import { useNavigate } from "react-router-dom";
 
 const FEATURES = [
-  { label: "Dépositaire central", desc: "Enregistrez des droits sur des titres pour des investisseurs identifiés.", path: "/depositary", chip: "Opérateur" },
-  { label: "Investisseur",        desc: "Consultez vos titres, redeem on-chain et mettez-les en pension.",          path: "/investor",   chip: "Porteur"   },
-  { label: "Marché repo",         desc: "Financez des positions repo ouvertes et gérez vos positions.",             path: "/market",     chip: "Public"    },
+  { label: "Depositary",   desc: "Register T-Bill rights for identified investors.", path: "/depositary", chip: "Operator" },
+  { label: "Investor",     desc: "View your T-Bills, redeem on-chain and use them as repo collateral.", path: "/investor", chip: "Holder" },
+  { label: "Repo Market",  desc: "Fund open repo positions and manage your positions.", path: "/market", chip: "Public" },
 ];
 
 export default function Home() {
@@ -17,10 +17,10 @@ export default function Home() {
           Argonath
         </Typography>
         <Typography variant="h6" color="#555" fontWeight={400}>
-          Plateforme de tokenisation de titres financiers et de repo on-chain sur Hedera.
+          T-Bill tokenization and on-chain repo platform on Hedera.
         </Typography>
         <Typography variant="body2" color="#888">
-          Un dépositaire central enregistre des droits sur des bons du Trésor. Les investisseurs les redeem sous forme de tokens, puis les placent en pension pour obtenir de la liquidité.
+          A central depositary records T-Bill rights for investors. Investors redeem them as tokens, then use them as collateral in repo transactions to obtain liquidity.
         </Typography>
       </Stack>
 
@@ -40,13 +40,12 @@ export default function Home() {
               <Typography variant="h6" fontWeight={700} color="#03045e">{label}</Typography>
               <Typography variant="body2" color="#666">{desc}</Typography>
               <Button variant="contained" size="small" sx={{ alignSelf: 'flex-start', mt: 1, backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' } }}>
-                Accéder
+                Access
               </Button>
             </Stack>
           </Box>
         ))}
       </Stack>
-
     </Stack>
   );
 }

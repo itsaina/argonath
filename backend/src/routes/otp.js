@@ -3,6 +3,7 @@ const router = express.Router();
 const { ethers } = require('ethers');
 const pool = require('../db/pool');
 const { publishEvent, phoneProof } = require('../services/hcs');
+const { normalizePhone } = require('../utils/phone');
 
 const VERIFYWAY_URL = 'https://api.verifyway.com/api/v1/';
 const VERIFYWAY_KEY = process.env.VERIFYWAY_API_KEY;
@@ -80,7 +81,7 @@ async function authorizeClaimsOnChain(phone, walletAddress) {
  * Body: { phone }
  */
 router.post('/send', async (req, res) => {
-  const { phone } = req.body;
+  const phone = normalizePhone(req.body.phone);
   if (!phone) return res.status(400).json({ error: 'phone required' });
 
   const code = generateCode();
@@ -124,7 +125,8 @@ router.post('/send', async (req, res) => {
  * Vérifie le code, puis autorise le wallet on-chain pour tous ses claims.
  */
 router.post('/verify', async (req, res) => {
-  const { phone, code, walletAddress } = req.body;
+  const phone = normalizePhone(req.body.phone);
+  const { code, walletAddress } = req.body;
   if (!phone || !code) return res.status(400).json({ error: 'phone and code required' });
 
   const entry = pendingOtps.get(phone);
@@ -155,7 +157,7 @@ router.post('/verify', async (req, res) => {
     publishEvent('wallet_phone_linked', {
       wallet:      walletAddress.toLowerCase(),
       phone_proof: phoneProof(phone),
-      public:     { label: 'Wallet lié à un compte vérifié par OTP' },
+      public:     { label: 'Wallet linked to OTP-verified account' },
       depositary: {},
     });
   }
@@ -169,11 +171,12 @@ router.post('/verify', async (req, res) => {
  * Body: { phone, walletAddress }
  */
 router.post('/authorize-test', async (req, res) => {
-  if (process.env.NODE_ENV === 'production') {
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_TEST_AUTHORIZE !== 'true') {
     return res.status(403).json({ error: 'Not available in production' });
   }
 
-  const { phone, walletAddress } = req.body;
+  const phone = normalizePhone(req.body.phone);
+  const { walletAddress } = req.body;
   console.log('[authorize-test] phone:', phone, 'wallet:', walletAddress);
   if (!phone || !walletAddress) return res.status(400).json({ error: 'phone and walletAddress required' });
   if (!ethers.isAddress(walletAddress)) return res.status(400).json({ error: 'Invalid wallet address' });
