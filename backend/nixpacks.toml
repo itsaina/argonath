@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["nodejs_20", "python3", "pkg-config", "nodePackages.npm"]
+aptPkgs = ["python3", "python3-dev", "build-essential"]
