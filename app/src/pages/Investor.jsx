@@ -1,0 +1,522 @@
+import { useState, useEffect, useCallback } from "react";
+import {
+  Alert, Box, Button, Chip, CircularProgress,
+  Paper, Stack, Tab, Tabs, TextField, Typography,
+} from "@mui/material";
+import { AccountId } from "@hashgraph/sdk";
+import { useWalletInterface } from "../services/wallets/useWalletInterface";
+import { fetchClaimsByPhone, confirmRedeem, sendOtp, verifyOtp, authorizeTest, fetchHCSMessages } from "../services/api";
+import {
+  CONTRACT_ADDRESSES, CLAIM_REGISTRY_ABI, BOND_TOKEN_ABI,
+  HTS_TOKEN_ID, HASHSCAN_TX_URL, EXPECTED_CHAIN_ID,
+} from "../services/contracts";
+import { ContractFunctionParameterBuilder } from "../services/wallets/contractFunctionParameterBuilder";
+import { ethers } from "ethers";
+
+// Convertit un accountId Hedera (0.0.XXXX) ou EVM (0x...) en adresse EVM
+function toEvmAddress(accountId) {
+  if (!accountId) return null;
+  if (accountId.startsWith('0x')) return accountId;
+  try { return '0x' + AccountId.fromString(accountId).toSolidityAddress(); }
+  catch { return accountId; }
+}
+
+const STATUS_COLORS = {
+  available: { bg: '#e8f5e9', color: '#2e7d32' },
+  published: { bg: '#e3f2fd', color: '#1565c0' },
+};
+
+// ─── Section : Claims disponibles (avec vérification OTP WhatsApp) ────────────
+function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
+  // Clé localStorage : liaison wallet ↔ téléphone
+  const storageKey = accountId ? `verified_phone_${accountId}` : null;
+  const savedPhone = storageKey ? localStorage.getItem(storageKey) : null;
+
+  const [phone, setPhone] = useState(savedPhone || '');
+  const [otpCode, setOtpCode] = useState('');
+  const [step, setStep] = useState(savedPhone ? 'verified' : 'phone'); // 'phone' | 'otp' | 'verified'
+  const [otpLoading, setOtpLoading] = useState(false);
+  const [otpError, setOtpError] = useState('');
+
+  const [claims, setClaims] = useState([]);
+  const [searched, setSearched] = useState(false);
+  const [claimsLoading, setClaimsLoading] = useState(false);
+  const [redeemLoading, setRedeemLoading] = useState({});
+  const [redeemStatus, setRedeemStatus] = useState({});
+
+  // Charger les titres automatiquement si déjà lié
+  useEffect(() => {
+    if (savedPhone && step === 'verified') {
+      setClaimsLoading(true);
+      fetchClaimsByPhone(savedPhone)
+        .then(data => { setClaims(data); setSearched(true); })
+        .catch(() => { setClaims([]); setSearched(true); })
+        .finally(() => setClaimsLoading(false));
+    }
+  }, []);
+
+  const handleTestAuthorize = async () => {
+    if (!phone) return;
+    if (!accountId) return alert("Connectez votre wallet d'abord.");
+    setOtpLoading(true); setOtpError('');
+    try {
+      await authorizeTest(phone, toEvmAddress(accountId));
+      if (storageKey) localStorage.setItem(storageKey, phone);
+      setStep('verified');
+      setClaimsLoading(true);
+      try { setClaims(await fetchClaimsByPhone(phone)); setSearched(true); }
+      catch { setClaims([]); setSearched(true); }
+      setClaimsLoading(false);
+    } catch (err) {
+      setOtpError(err.message || 'Erreur lors de l\'autorisation test.');
+    }
+    setOtpLoading(false);
+  };
+
+  const handleSendOtp = async () => {
+    if (!phone) return;
+    setOtpLoading(true); setOtpError('');
+    try {
+      await sendOtp(phone);
+      setStep('otp');
+    } catch (err) {
+      setOtpError(err.message || 'Impossible d\'envoyer l\'OTP.');
+    }
+    setOtpLoading(false);
+  };
+
+  const handleVerifyOtp = async () => {
+    if (!otpCode) return;
+    setOtpLoading(true); setOtpError('');
+    try {
+      await verifyOtp(phone, otpCode, accountId);
+      // Persiste la liaison wallet ↔ téléphone
+      if (storageKey) localStorage.setItem(storageKey, phone);
+      setStep('verified');
+      setClaimsLoading(true);
+      try { setClaims(await fetchClaimsByPhone(phone)); setSearched(true); }
+      catch { setClaims([]); setSearched(true); }
+      setClaimsLoading(false);
+    } catch (err) {
+      setOtpError('Code incorrect ou expiré. Réessayez.');
+    }
+    setOtpLoading(false);
+  };
+
+  const handleUnlink = () => {
+    if (storageKey) localStorage.removeItem(storageKey);
+    setPhone(''); setOtpCode(''); setStep('phone');
+    setClaims([]); setSearched(false);
+  };
+
+  const handleAssociate = async () => {
+    if (!accountId || !HTS_TOKEN_ID) return;
+    try {
+      // walletInterface.associateToken gère MetaMask et WalletConnect
+      // avec le bon gas limit (800k) via METAMASK_GAS_LIMIT_ASSOCIATE
+      await walletInterface.associateToken(HTS_TOKEN_ID);
+      setRedeemStatus(s => ({ ...s, associate: 'done' }));
+    } catch (err) {
+      // Erreur silencieuse : token déjà associé ou association non requise
+      console.warn('[associate]', err?.message || err);
+    }
+  };
+
+  const handleRedeem = async (claim) => {
+    if (!accountId) return alert("Connectez votre wallet d'abord.");
+    setRedeemLoading(l => ({ ...l, [claim.id]: true }));
+    setRedeemStatus(s => ({ ...s, [claim.id]: '' }));
+    try {
+      // 1. Autorisation on-chain via backend (mode test : pas d'OTP requis)
+      await authorizeTest(phone, toEvmAddress(accountId));
+
+      // 2. Association HTS (silencieuse si déjà associé)
+      await handleAssociate();
+
+      // 3. Redeem on-chain via ClaimRegistry EVM
+      const claimId = ethers.utils.id(claim.batch_id);
+      const params = new ContractFunctionParameterBuilder()
+        .addParam({ type: 'bytes32', name: 'claimId', value: claimId })
+        .addParam({ type: 'uint256', name: 'amount',  value: 1 });
+
+      const txHash = await walletInterface.executeContractFunction(
+        CONTRACT_ADDRESSES.ClaimRegistry, 'redeem', params, 300_000
+      );
+
+      if (txHash) {
+        // 4. Backend mint HTS et confirme en DB
+        const result = await confirmRedeem(claim.id, txHash, toEvmAddress(accountId));
+        const hashscanEvmTx = HASHSCAN_TX_URL ? `${HASHSCAN_TX_URL}${txHash}` : null;
+        const hashscanHts   = result?.hts?.hashscanTransfer || null;
+
+        setRedeemStatus(s => ({
+          ...s,
+          [claim.id]: { status: 'success', hashscanEvmTx, hashscanHts },
+        }));
+        setClaims(prev => prev.filter(c => c.id !== claim.id));
+        setTimeout(() => onRedeemed && onRedeemed(), 2500);
+      } else {
+        setRedeemStatus(s => ({ ...s, [claim.id]: { status: 'error' } }));
+      }
+    } catch (err) {
+      console.error(err);
+      setRedeemStatus(s => ({ ...s, [claim.id]: { status: 'error' } }));
+    }
+    setRedeemLoading(l => ({ ...l, [claim.id]: false }));
+  };
+
+  return (
+    <Stack spacing={3}>
+      <Typography variant="h6" fontWeight={700} color="#03045e">Mes titres disponibles</Typography>
+
+      {/* Étape 1 : saisie du numéro */}
+      {step === 'phone' && (
+        <Stack spacing={2} maxWidth={420}>
+          <Typography variant="body2" color="#666">
+            Entrez votre numéro WhatsApp pour recevoir un code de vérification.
+          </Typography>
+          <Stack direction="row" spacing={2}>
+            <TextField
+              label="Numéro WhatsApp" value={phone}
+              onChange={e => setPhone(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleSendOtp()}
+              placeholder="+261 XX XX XXX XX"
+              fullWidth
+            />
+            <Button variant="contained" onClick={handleSendOtp} disabled={otpLoading || !phone}
+              sx={{ backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' }, whiteSpace: 'nowrap' }}>
+              {otpLoading ? <CircularProgress size={18} color="inherit" /> : 'Envoyer OTP'}
+            </Button>
+          </Stack>
+          {otpError && <Alert severity="error" sx={{ py: 0 }}>{otpError}</Alert>}
+          <Button size="small" variant="outlined" onClick={handleTestAuthorize} disabled={otpLoading || !phone}
+            sx={{ alignSelf: 'flex-start', borderColor: '#f57c00', color: '#f57c00', fontSize: 11 }}>
+            {otpLoading ? <CircularProgress size={14} color="inherit" /> : '⚡ Mode test (sans OTP)'}
+          </Button>
+        </Stack>
+      )}
+
+      {/* Étape 2 : saisie du code OTP */}
+      {step === 'otp' && (
+        <Stack spacing={2} maxWidth={420}>
+          <Alert severity="success" sx={{ py: 0 }}>
+            Code envoyé sur WhatsApp au <b>{phone}</b>
+          </Alert>
+          <Stack direction="row" spacing={2}>
+            <TextField
+              label="Code OTP" value={otpCode}
+              onChange={e => setOtpCode(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleVerifyOtp()}
+              placeholder="123456"
+              fullWidth inputProps={{ maxLength: 8 }}
+            />
+            <Button variant="contained" onClick={handleVerifyOtp} disabled={otpLoading || !otpCode}
+              sx={{ backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' }, whiteSpace: 'nowrap' }}>
+              {otpLoading ? <CircularProgress size={18} color="inherit" /> : 'Vérifier'}
+            </Button>
+          </Stack>
+          {otpError && <Alert severity="error" sx={{ py: 0 }}>{otpError}</Alert>}
+          <Button size="small" onClick={() => { setStep('phone'); setOtpCode(''); setOtpError(''); }}
+            sx={{ alignSelf: 'flex-start', color: '#888', fontSize: 11 }}>
+            ← Changer de numéro
+          </Button>
+        </Stack>
+      )}
+
+      {/* Étape 3 : numéro vérifié, affichage des titres */}
+      {step === 'verified' && (
+        <>
+          <Stack direction="row" spacing={2} alignItems="center" maxWidth={420}>
+            <TextField
+              label="Numéro WhatsApp" value={phone} fullWidth disabled
+              sx={{ '& .MuiInputBase-input.Mui-disabled': { WebkitTextFillColor: '#555' } }}
+            />
+            <Button size="small" variant="outlined" onClick={handleUnlink}
+              sx={{ whiteSpace: 'nowrap', borderColor: '#ccc', color: '#888', fontSize: 11 }}>
+              Délier
+            </Button>
+          </Stack>
+
+          {claimsLoading && <CircularProgress sx={{ alignSelf: 'flex-start' }} />}
+
+          {searched && claims.length === 0 && !claimsLoading && (
+            <Alert severity="info">Aucun titre disponible pour ce numéro.</Alert>
+          )}
+
+          {claims.map(c => (
+            <Paper key={c.id} elevation={0} sx={{ border: '1.5px solid #e0e0e0', borderRadius: 3, p: 3 }}>
+              <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} spacing={2}>
+                <Stack spacing={0.5}>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Typography fontWeight={700} color="#03045e">{c.bond_type}</Typography>
+                    <Chip label={c.status === 'published' ? 'Publié' : 'Disponible'} size="small"
+                      sx={{ backgroundColor: STATUS_COLORS[c.status]?.bg, color: STATUS_COLORS[c.status]?.color, fontWeight: 600 }} />
+                  </Stack>
+                  <Typography variant="body2" color="#666">
+                    Montant : <b>{Number(c.nominal_amount).toLocaleString()} MGA</b> · Taux : <b>{(Number(c.rate) * 100).toFixed(2)}%</b>
+                  </Typography>
+                  <Typography variant="body2" color="#666">
+                    Maturité : <b>{new Date(c.maturity_date).toLocaleDateString('fr-FR')}</b> · Lot : <b>{c.batch_id}</b>
+                  </Typography>
+                </Stack>
+                <Stack spacing={1} alignItems={{ md: 'flex-end' }}>
+                  {redeemStatus[c.id]?.status === 'success' && (
+                    <Stack spacing={0.5}>
+                      <Alert severity="success" sx={{ py: 0 }}>1 ARGN minté et transféré ✓</Alert>
+                      {redeemStatus[c.id].hashscanEvmTx && (
+                        <Typography variant="caption">
+                          <a href={redeemStatus[c.id].hashscanEvmTx} target="_blank" rel="noreferrer" style={{ color: '#1565c0' }}>
+                            Voir tx EVM sur HashScan →
+                          </a>
+                        </Typography>
+                      )}
+                      {redeemStatus[c.id].hashscanHts && (
+                        <Typography variant="caption">
+                          <a href={redeemStatus[c.id].hashscanHts} target="_blank" rel="noreferrer" style={{ color: '#1565c0' }}>
+                            Voir tx HTS sur HashScan →
+                          </a>
+                        </Typography>
+                      )}
+                    </Stack>
+                  )}
+                  {redeemStatus[c.id]?.status === 'error' && <Alert severity="error" sx={{ py: 0 }}>Échec du redeem</Alert>}
+                  <Button variant="contained" disabled={redeemLoading[c.id]}
+                    onClick={() => handleRedeem(c)}
+                    sx={{ backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' }, minWidth: 140 }}>
+                    {redeemLoading[c.id] ? <CircularProgress size={18} color="inherit" /> : 'Redeem on-chain'}
+                  </Button>
+                </Stack>
+              </Stack>
+            </Paper>
+          ))}
+        </>
+      )}
+    </Stack>
+  );
+}
+
+// ─── Section : Portefeuille ────────────────────────────────────────────────────
+function PortfolioSection({ accountId }) {
+  const [argnBalance, setArgnBalance] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const hasContracts = !!CONTRACT_ADDRESSES.BondToken;
+
+  const loadPortfolio = async () => {
+    if (!accountId || !hasContracts) return;
+    setLoading(true);
+    try {
+      // Encode balanceOf(address) via ethers Interface et appel eth_call direct
+      const evmAddr = toEvmAddress(accountId);
+      const iface = new ethers.utils.Interface(['function balanceOf(address) view returns (uint256)']);
+      const data = iface.encodeFunctionData('balanceOf', [evmAddr]);
+
+      let result;
+      if (window.ethereum) {
+        result = await window.ethereum.request({
+          method: 'eth_call',
+          params: [{ to: CONTRACT_ADDRESSES.BondToken, data }, 'latest'],
+        });
+      } else {
+        const rpc = process.env.REACT_APP_RPC_URL || 'http://127.0.0.1:8545';
+        const resp = await fetch(rpc, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: CONTRACT_ADDRESSES.BondToken, data }, 'latest'] }),
+        });
+        const json = await resp.json();
+        result = json.result;
+      }
+
+      // '0x' = contract absent ou résultat vide → balance 0
+      const bal = (result && result !== '0x')
+        ? ethers.BigNumber.from(result)
+        : ethers.BigNumber.from(0);
+      setArgnBalance(bal.toString());
+    } catch (err) {
+      console.error('[portfolio] balanceOf error:', err.message || err);
+      setArgnBalance(null);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { loadPortfolio(); }, [accountId]);
+
+  return (
+    <Stack spacing={3}>
+      <Typography variant="h6" fontWeight={700} color="#03045e">Mon portefeuille</Typography>
+      {!hasContracts ? (
+        <Alert severity="warning">Contrats non déployés. Configurez les adresses dans <code>.env</code>.</Alert>
+      ) : loading ? (
+        <CircularProgress />
+      ) : argnBalance === null ? (
+        <Alert severity="info">Impossible de lire la balance.</Alert>
+      ) : argnBalance === '0' ? (
+        <Alert severity="info">Aucun titre ARGN dans votre wallet.</Alert>
+      ) : (
+        <Paper elevation={0} sx={{ border: '1.5px solid #e0e0e0', borderRadius: 3, p: 3 }}>
+          <Typography variant="h4" fontWeight={700} color="#03045e">{argnBalance} <span style={{ fontSize: 18, color: '#888' }}>ARGN</span></Typography>
+          <Typography variant="body2" color="#666" mt={0.5}>Titres Argonath Bond tokenisés dans votre wallet</Typography>
+          <Button size="small" variant="outlined" onClick={loadPortfolio} sx={{ mt: 2, borderColor: '#03045e', color: '#03045e', fontSize: 12 }}>Actualiser</Button>
+        </Paper>
+      )}
+    </Stack>
+  );
+}
+
+// Libellés lisibles pour chaque événement HCS
+const HCS_EVENT_LABELS = {
+  wallet_phone_linked:          '🔗 Wallet lié à un compte vérifié',
+  allocation_created:           '📄 Allocation de titre créée',
+  allocation_status_changed:    '🔄 Statut d\'allocation mis à jour',
+  allocation_redeemed:          '🏦 Allocation rachetée (ARGN minted)',
+  repo_lending_offer_created:   '💰 Offre de liquidité créée',
+  repo_borrow_request_created:  '📋 Demande d\'emprunt créée',
+  repo_offer_accepted:          '✅ Offre acceptée',
+  repo_proposal_submitted:      '📨 Proposition soumise',
+  repo_proposal_accepted:       '🤝 Proposition acceptée',
+  repo_request_funded:          '💸 Demande financée',
+  repo_repaid:                  '💳 Remboursement effectué',
+  repo_default_claimed:         '⚠️ Défaut réclamé',
+  repo_offer_cancelled:         '❌ Offre annulée',
+  repo_request_cancelled:       '❌ Demande annulée',
+};
+
+// ─── Section : Historique HCS ─────────────────────────────────────────────────
+function HistorySection({ accountId }) {
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading]   = useState(false);
+  const evmAddr = toEvmAddress(accountId)?.toLowerCase();
+
+  const load = useCallback(async () => {
+    if (!evmAddr) return;
+    setLoading(true);
+    try {
+      const data = await fetchHCSMessages({ wallet: evmAddr, limit: 50 });
+      setMessages(Array.isArray(data) ? data : []);
+    } catch {}
+    setLoading(false);
+  }, [evmAddr]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (!process.env.REACT_APP_HCS_TOPIC_ID) {
+    return <Alert severity="info">Journal HCS non configuré sur ce déploiement.</Alert>;
+  }
+
+  return (
+    <Stack spacing={3}>
+      <Stack direction="row" justifyContent="space-between" alignItems="center">
+        <Typography variant="h6" fontWeight={700} color="#03045e">Mon historique notarial</Typography>
+        <Button size="small" variant="outlined" onClick={load} disabled={loading}
+          sx={{ borderColor: '#03045e', color: '#03045e' }}>
+          {loading ? <CircularProgress size={16} /> : 'Rafraîchir'}
+        </Button>
+      </Stack>
+      <Typography variant="body2" color="#888">
+        Enregistrements immuables sur le Hedera Consensus Service liés à votre wallet.
+      </Typography>
+
+      {loading && <CircularProgress sx={{ alignSelf: 'center' }} />}
+
+      {!loading && messages.length === 0 && (
+        <Alert severity="info">Aucun événement enregistré pour votre wallet.</Alert>
+      )}
+
+      {messages.map((msg, i) => {
+        const ts  = msg.ts ? new Date(msg.ts).toLocaleString('fr-FR') : '—';
+        const pub = msg.public || {};
+        const label = HCS_EVENT_LABELS[msg.event] || msg.event || 'Événement';
+        return (
+          <Paper key={i} elevation={0} sx={{ border: '1px solid #e0e0e0', borderRadius: 2, p: 2 }}>
+            <Stack spacing={1}>
+              <Stack direction="row" justifyContent="space-between" alignItems="center">
+                <Typography variant="body2" fontWeight={700} color="#03045e">{label}</Typography>
+                <Typography variant="caption" color="#888">{ts}</Typography>
+              </Stack>
+              {/* Données publiques (hors label) */}
+              {Object.keys(pub).filter(k => k !== 'label').length > 0 && (
+                <Stack direction="row" spacing={2} flexWrap="wrap">
+                  {Object.entries(pub).filter(([k]) => k !== 'label').map(([k, v]) => (
+                    <Box key={k}>
+                      <Typography variant="caption" color="#888" display="block">{k}</Typography>
+                      <Typography variant="body2" fontSize="0.8rem">{String(v)}</Typography>
+                    </Box>
+                  ))}
+                </Stack>
+              )}
+              {msg.phone_proof && (
+                <Typography variant="caption" color="#9e9e9e" fontFamily="monospace">
+                  phone_proof : {msg.phone_proof.slice(0, 20)}…
+                </Typography>
+              )}
+            </Stack>
+          </Paper>
+        );
+      })}
+    </Stack>
+  );
+}
+
+// ─── Page principale Investor ──────────────────────────────────────────────────
+export default function Investor() {
+  const { accountId, walletInterface } = useWalletInterface();
+  const [tab, setTab] = useState(0);
+  const [wrongNetwork, setWrongNetwork] = useState(false);
+
+  useEffect(() => {
+    if (!window.ethereum) return;
+    const checkNetwork = async () => {
+      const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+      // 31337 = 0x7a69 Hardhat local
+      setWrongNetwork(chainId !== EXPECTED_CHAIN_ID);
+    };
+    checkNetwork();
+    window.ethereum.on('chainChanged', checkNetwork);
+    return () => window.ethereum.removeListener('chainChanged', checkNetwork);
+  }, []);
+
+  if (!accountId) {
+    return (
+      <Stack alignItems="center" justifyContent="center" minHeight="60vh" spacing={2}>
+        <Typography variant="h5" fontWeight={700} color="#03045e">Interface Investisseur</Typography>
+        <Typography color="#666">Connectez votre wallet MetaMask ou WalletConnect pour accéder à vos titres.</Typography>
+        <Alert severity="info" sx={{ maxWidth: 480 }}>
+          Utilisez le bouton <b>Connecter Wallet</b> dans la barre de navigation.
+        </Alert>
+      </Stack>
+    );
+  }
+
+  return (
+    <Stack spacing={4}>
+      <Box>
+        <Typography variant="h5" fontWeight={700} color="#03045e">Interface Investisseur</Typography>
+        <Typography variant="body2" color="#888">
+          Wallet connecté : <b>{accountId}</b>
+        </Typography>
+      </Box>
+
+      {wrongNetwork && (
+        <Alert severity="error">
+          ⚠️ Mauvais réseau — connectez MetaMask au réseau <b>Hedera Testnet</b> (RPC : <code>https://testnet.hashio.io/api</code>, Chain ID : <b>296</b>, Symbol : <b>HBAR</b>).
+        </Alert>
+      )}
+
+      <Box sx={{ borderBottom: 1, borderColor: '#e0e0e0' }}>
+        <Tabs value={tab} onChange={(_, v) => setTab(v)}
+          TabIndicatorProps={{ style: { backgroundColor: '#03045e' } }}>
+          {['Mes titres', 'Portefeuille', 'Historique HCS'].map((l, i) => (
+            <Tab key={i} label={l} sx={{ fontWeight: 600, color: tab === i ? '#03045e' : '#666' }} />
+          ))}
+        </Tabs>
+      </Box>
+
+      <Box>
+        {tab === 0 && <ClaimsSection accountId={accountId} walletInterface={walletInterface} onRedeemed={() => setTab(1)} />}
+        {tab === 1 && <PortfolioSection accountId={accountId} />}
+        {tab === 2 && <HistorySection accountId={accountId} />}
+      </Box>
+    </Stack>
+  );
+}
