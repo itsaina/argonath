@@ -43,6 +43,7 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
   const [claimsLoading, setClaimsLoading] = useState(false);
   const [redeemLoading, setRedeemLoading] = useState({});
   const [redeemStatus, setRedeemStatus] = useState({});
+  const [reauthorizing, setReauthorizing] = useState(false);
 
   // Charger les titres automatiquement si déjà lié
   useEffect(() => {
@@ -63,13 +64,25 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
     const evmAddr = toEvmAddress(accountId);
     if (!evmAddr) return;
     fetchClaimsByPhone(savedPhone)
-      .then(data => {
+      .then(async data => {
         setClaims(data);
         const hasUnauthorized = data.some(c => !c.wallet_address);
         if (hasUnauthorized) {
-          reauthorize(savedPhone, evmAddr)
-            .then(() => fetchClaimsByPhone(savedPhone).then(setClaims))
-            .catch(err => console.warn('[reauthorize]', err.message));
+          setReauthorizing(true);
+          try {
+            await reauthorize(savedPhone, evmAddr);
+            // Polling jusqu'à ce que tous les claims aient wallet_address
+            for (let i = 0; i < 15; i++) {
+              await new Promise(r => setTimeout(r, 3000));
+              const refreshed = await fetchClaimsByPhone(savedPhone);
+              setClaims(refreshed);
+              if (refreshed.every(c => c.wallet_address)) break;
+            }
+          } catch (err) {
+            console.warn('[reauthorize]', err.message);
+          } finally {
+            setReauthorizing(false);
+          }
         }
       })
       .catch(() => {});
@@ -298,7 +311,10 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
                     </Stack>
                   )}
                   {redeemStatus[c.id]?.status === 'error' && <Alert severity="error" sx={{ py: 0 }}>Redeem failed</Alert>}
-                  <Button variant="contained" disabled={redeemLoading[c.id]}
+                  {(reauthorizing && !c.wallet_address) && (
+                    <Alert severity="info" sx={{ py: 0 }}>Authorizing on-chain…</Alert>
+                  )}
+                  <Button variant="contained" disabled={redeemLoading[c.id] || (reauthorizing && !c.wallet_address)}
                     onClick={() => handleRedeem(c)}
                     sx={{ backgroundColor: '#03045e', '&:hover': { backgroundColor: '#020338' }, minWidth: 140 }}>
                     {redeemLoading[c.id] ? <CircularProgress size={18} color="inherit" /> : 'Redeem on-chain'}
