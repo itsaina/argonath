@@ -1010,12 +1010,22 @@ export default function Market() {
         const enriched = await Promise.all(dbOffers.map(async (row) => {
           try {
             if (row.contract_addr && row.contract_addr.toLowerCase() !== CONTRACT_ADDRESSES.RepoEscrow.toLowerCase()) {
-              return { ...row, _id: row.id, status: 99, _archived: true };
+              return { ...row, _id: row.id, status: 99, _archived: true,
+                // Map DB field names → on-chain field names for UI compatibility
+                lender: row.lender, cashAmount: row.cash_amount, repoRateBps: row.repo_rate_bps,
+                haircut: row.haircut_bps, durationSeconds: row.duration_sec,
+                borrower: row.borrower, collateralLocked: row.collateral_amount,
+                desiredCash: row.desired_cash, maxRateBps: row.max_rate_bps };
             }
             const onChain = await contract.offers(row.id);
             return { ...onChain, _id: row.id };
           } catch {
-            return { ...row, _id: row.id, status: 99, _archived: true };
+            return { ...row, _id: row.id, status: 99, _archived: true,
+                // Map DB field names → on-chain field names for UI compatibility
+                lender: row.lender, cashAmount: row.cash_amount, repoRateBps: row.repo_rate_bps,
+                haircut: row.haircut_bps, durationSeconds: row.duration_sec,
+                borrower: row.borrower, collateralLocked: row.collateral_amount,
+                desiredCash: row.desired_cash, maxRateBps: row.max_rate_bps };
           }
         }));
         setOffers(enriched);
@@ -1044,12 +1054,22 @@ export default function Market() {
         const enriched = await Promise.all(dbRequests.map(async (row) => {
           try {
             if (row.contract_addr && row.contract_addr.toLowerCase() !== CONTRACT_ADDRESSES.RepoEscrow.toLowerCase()) {
-              return { ...row, _id: row.id, status: 99, _archived: true };
+              return { ...row, _id: row.id, status: 99, _archived: true,
+                // Map DB field names → on-chain field names for UI compatibility
+                lender: row.lender, cashAmount: row.cash_amount, repoRateBps: row.repo_rate_bps,
+                haircut: row.haircut_bps, durationSeconds: row.duration_sec,
+                borrower: row.borrower, collateralLocked: row.collateral_amount,
+                desiredCash: row.desired_cash, maxRateBps: row.max_rate_bps };
             }
             const onChain = await contract.borrowRequests(row.id);
             return { ...onChain, _id: row.id };
           } catch {
-            return { ...row, _id: row.id, status: 99, _archived: true };
+            return { ...row, _id: row.id, status: 99, _archived: true,
+                // Map DB field names → on-chain field names for UI compatibility
+                lender: row.lender, cashAmount: row.cash_amount, repoRateBps: row.repo_rate_bps,
+                haircut: row.haircut_bps, durationSeconds: row.duration_sec,
+                borrower: row.borrower, collateralLocked: row.collateral_amount,
+                desiredCash: row.desired_cash, maxRateBps: row.max_rate_bps };
           }
         }));
         setRequests(enriched);

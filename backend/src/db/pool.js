@@ -4,9 +4,14 @@
  */
 const Database = require('better-sqlite3');
 const path = require('path');
+const fs = require('fs');
 
-const DB_PATH = path.join(__dirname, '..', '..', 'argonath.db');
+// Sur Railway : volume persistant monté sur /data ; sinon fichier local
+const VOLUME_PATH = '/data/argonath.db';
+const LOCAL_PATH = path.join(__dirname, '..', '..', 'argonath.db');
+const DB_PATH = fs.existsSync('/data') ? VOLUME_PATH : LOCAL_PATH;
 const db = new Database(DB_PATH);
+console.log(`[db] SQLite: ${DB_PATH}`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS claims (
