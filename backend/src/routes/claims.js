@@ -236,51 +236,111 @@ router.post('/:id/authorize', async (req, res) => {
  * POST /api/claims/:id/confirm-redeem
  * Confirme le redeem après tx on-chain (appelé par le frontend).
  * Body: { txHash }
+ *
+ * Sécurité :
+ *  1. walletAddress n'est JAMAIS lu depuis le body — uniquement depuis claim.wallet_address (enregistré lors de l'OTP).
+ *  2. txHash est vérifié on-chain : la transaction doit contenir l'event ClaimRedeemed
+ *     émis par ClaimRegistry, avec le bon claimId ET le bon wallet.
+ *  3. Idempotence : l'UPDATE échoue silencieusement si le claim est déjà 'redeemed'.
  */
 router.post('/:id/confirm-redeem', async (req, res) => {
   const { id } = req.params;
-  const { txHash, walletAddress: bodyWallet } = req.body;
+  const { txHash } = req.body; // walletAddress du body ignoré intentionnellement
+
+  if (!txHash) return res.status(400).json({ error: 'txHash requis' });
 
   try {
+    // 1. Lire le claim avant toute modification
+    const existing = await pool.query(`SELECT * FROM claims WHERE id = $1`, [id]);
+    if (existing.rows.length === 0) return res.status(404).json({ error: 'Claim not found' });
+    const claim = existing.rows[0];
+
+    // 2. Idempotence — refuser si déjà redeemed
+    if (claim.status === 'redeemed') {
+      return res.status(409).json({ error: 'Already redeemed' });
+    }
+
+    // 3. Wallet doit avoir été enregistré via OTP — jamais fourni par le body
+    if (!claim.wallet_address) {
+      return res.status(403).json({ error: 'Wallet non autorisé — effectuez la vérification OTP d\'abord' });
+    }
+
+    // 4. Vérification on-chain : la tx doit contenir ClaimRedeemed(claimId, wallet, amount)
+    //    émis par l'adresse ClaimRegistry, avec le claimId et le wallet correspondant au claim.
+    //    Optionnel si CLAIM_REGISTRY_ADDRESS ou RPC_URL absent (environnement dev sans contrats).
+    const registryAddress = process.env.CLAIM_REGISTRY_ADDRESS;
+    const rpcUrl = process.env.RPC_URL;
+    if (registryAddress && rpcUrl) {
+      try {
+        const provider = new ethers.JsonRpcProvider(rpcUrl);
+        const receipt = await provider.getTransactionReceipt(txHash);
+        if (!receipt) {
+          return res.status(400).json({ error: 'Transaction introuvable on-chain' });
+        }
+
+        const iface = new ethers.Interface([
+          'event ClaimRedeemed(bytes32 indexed claimId, address indexed wallet, uint256 amount)',
+        ]);
+        const expectedClaimId = ethers.id(claim.batch_id); // keccak256(batch_id)
+
+        const found = receipt.logs.some(log => {
+          try {
+            if (log.address.toLowerCase() !== registryAddress.toLowerCase()) return false;
+            const parsed = iface.parseLog({ topics: log.topics, data: log.data });
+            return (
+              parsed.name === 'ClaimRedeemed' &&
+              parsed.args.claimId === expectedClaimId &&
+              parsed.args.wallet.toLowerCase() === claim.wallet_address.toLowerCase()
+            );
+          } catch { return false; }
+        });
+
+        if (!found) {
+          return res.status(403).json({ error: 'Event ClaimRedeemed absent ou invalide dans la transaction' });
+        }
+      } catch (verifyErr) {
+        console.error('[confirm-redeem] vérification on-chain échouée:', verifyErr.message);
+        return res.status(502).json({ error: 'Impossible de vérifier la transaction on-chain' });
+      }
+    }
+
+    // 5. Marquer comme redeemed — WHERE status != 'redeemed' garantit l'idempotence en cas de race condition
     const result = await pool.query(
-      `UPDATE claims SET status = 'redeemed', updated_at = NOW() WHERE id = $1 RETURNING *`,
+      `UPDATE claims SET status = 'redeemed', updated_at = NOW() WHERE id = $1 AND status != 'redeemed' RETURNING *`,
       [id]
     );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Claim not found' });
-    const claim = result.rows[0];
+    if (result.rows.length === 0) {
+      return res.status(409).json({ error: 'Already redeemed' });
+    }
+    const updated = result.rows[0];
 
-    // Utilise wallet_address du body si non enregistré en DB (flow test sans /authorize)
-    const recipientWallet = claim.wallet_address || bodyWallet;
-
-    // Mint HTS ARGN et transfère à l'investisseur si HTS_TOKEN_ID configuré
+    // 6. Mint HTS ARGN — uniquement vers wallet_address enregistré en DB
     let htsResult = null;
-    if (process.env.HTS_TOKEN_ID && recipientWallet) {
+    if (process.env.HTS_TOKEN_ID && updated.wallet_address) {
       try {
-        const mintAmount = Math.round(Number(claim.nominal_amount));
-        htsResult = await mintAndTransfer(recipientWallet, mintAmount);
+        const mintAmount = Math.round(Number(updated.nominal_amount));
+        htsResult = await mintAndTransfer(updated.wallet_address, mintAmount);
         console.log('[confirm-redeem] HTS mint+transfer OK', htsResult);
       } catch (htsErr) {
         console.error('[confirm-redeem] HTS error (non-bloquant):', htsErr.message);
       }
     }
 
-    // Enregistre la maturité des bonds dans BondMetadata (lu par RepoEscrow)
-    // Non-bloquant — le repo sera refusé si la maturité n'est pas enregistrée
-    if (recipientWallet && claim.maturity_date) {
-      setBondMaturity(recipientWallet, claim.maturity_date);
+    // 7. Enregistre la maturité des bonds dans BondMetadata (lu par RepoEscrow)
+    if (updated.wallet_address && updated.maturity_date) {
+      setBondMaturity(updated.wallet_address, updated.maturity_date);
     }
 
-    // Notarisation HCS — non bloquante
-    // Aucune donnée personnelle on-chain : uniquement des preuves cryptographiques
-    if (claim.phone) {
+    // 8. Notarisation HCS — non bloquante
+    if (updated.phone) {
       publishEvent('allocation_redeemed', {
-        wallet:         recipientWallet?.toLowerCase(),
-        phone_proof:    phoneProof(claim.phone),
-        identity_proof: identityProof(claim.first_name, claim.last_name, claim.phone),
-        claim_proof:    claimProof(claim.batch_id),
+        wallet:         updated.wallet_address.toLowerCase(),
+        phone_proof:    phoneProof(updated.phone),
+        identity_proof: identityProof(updated.first_name, updated.last_name, updated.phone),
+        claim_proof:    claimProof(updated.batch_id),
         public: {
-          bond_type:      claim.bond_type,
-          nominal_amount: claim.nominal_amount,
+          bond_type:      updated.bond_type,
+          nominal_amount: updated.nominal_amount,
           label: 'T-Bill allocation redeemed (ARGN minted)',
         },
         depositary: {
@@ -289,7 +349,7 @@ router.post('/:id/confirm-redeem', async (req, res) => {
       });
     }
 
-    res.json({ success: true, claim, hts: htsResult });
+    res.json({ success: true, claim: updated, hts: htsResult });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Database error' });

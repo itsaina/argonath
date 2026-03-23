@@ -11,7 +11,25 @@
  */
 const express = require('express');
 const router  = express.Router();
+const { ethers } = require('ethers');
 const { publishEvent } = require('../services/hcs');
+
+// Events que le frontend est autorisé à publier (actions on-chain uniquement)
+// Les events métier sensibles (authorize, redeem, mint) sont publiés directement
+// depuis les routes backend — jamais via ce endpoint.
+const ALLOWED_FRONTEND_EVENTS = new Set([
+  'repo_lending_offer_created',
+  'repo_borrow_request_created',
+  'repo_offer_accepted',
+  'repo_offer_cancelled',
+  'repo_borrow_request_cancelled',
+  'repo_request_funded',
+  'repo_repaid',
+  'repo_request_repaid',
+  'repo_margin_call_triggered',
+  'repo_default_claimed',
+  'repo_request_default_claimed',
+]);
 
 const MIRROR = 'https://testnet.mirrornode.hedera.com';
 
@@ -27,10 +45,21 @@ router.post('/notify', async (req, res) => {
   const { event, wallet, data = {} } = req.body;
   if (!event || !wallet) return res.status(400).json({ error: 'event et wallet requis' });
 
+  // Whitelist : seuls les events on-chain frontend sont acceptés
+  if (!ALLOWED_FRONTEND_EVENTS.has(event)) {
+    return res.status(400).json({ error: `Event non autorisé : ${event}` });
+  }
+
+  // Validation adresse wallet
+  if (!ethers.isAddress(wallet)) {
+    return res.status(400).json({ error: 'wallet invalide' });
+  }
+
+  // Le bloc depositary n'est jamais renseigné depuis le frontend (données sensibles)
   await publishEvent(event, {
     wallet: wallet.toLowerCase(),
-    public:     data.public     || data || {},
-    depositary: data.depositary || {},
+    public:     data.public || {},
+    depositary: {},
   });
 
   res.json({ success: true });

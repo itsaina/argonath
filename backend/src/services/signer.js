@@ -6,14 +6,10 @@ function getWallet() {
   if (!wallet) {
     const privateKey = process.env.BACKEND_PRIVATE_KEY;
     const isValid = privateKey && /^0x[0-9a-fA-F]{64}$/.test(privateKey);
-    if (isValid) {
-      wallet = new ethers.Wallet(privateKey);
-    } else {
-      // Génère un wallet éphémère pour le PoC si aucune clé valide n'est configurée
-      wallet = ethers.Wallet.createRandom();
-      console.warn(`[signer] BACKEND_PRIVATE_KEY non configurée — wallet éphémère généré : ${wallet.address}`);
-      console.warn(`[signer] Exportez cette clé dans .env : BACKEND_PRIVATE_KEY=${wallet.privateKey}`);
+    if (!isValid) {
+      throw new Error('[signer] BACKEND_PRIVATE_KEY manquante ou invalide — démarrage impossible. Définissez une clé ECDSA 32 bytes (0x + 64 hex chars) dans les variables d\'environnement.');
     }
+    wallet = new ethers.Wallet(privateKey);
   }
   return wallet;
 }
