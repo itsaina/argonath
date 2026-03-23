@@ -191,4 +191,34 @@ router.post('/authorize-test', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/otp/reauthorize
+ * Re-autorise on-chain les claims non encore enregistrés pour un wallet déjà vérifié.
+ * Appelé par le frontend quand des claims sans wallet_address sont détectés.
+ * Body: { phone, walletAddress }
+ */
+router.post('/reauthorize', async (req, res) => {
+  const phone = normalizePhone(req.body.phone);
+  const { walletAddress } = req.body;
+  if (!phone || !walletAddress) return res.status(400).json({ error: 'phone and walletAddress required' });
+  if (!ethers.isAddress(walletAddress)) return res.status(400).json({ error: 'Invalid wallet address' });
+
+  // Vérifie qu'au moins un claim de ce phone a déjà ce wallet_address (preuve que le wallet a bien été vérifié via OTP)
+  const existing = await pool.query(
+    `SELECT 1 FROM claims WHERE phone = $1 AND wallet_address = $2 LIMIT 1`,
+    [phone, walletAddress.toLowerCase()]
+  );
+  if (existing.rows.length === 0) {
+    return res.status(403).json({ error: 'Wallet non associé à ce numéro — OTP requis' });
+  }
+
+  try {
+    await authorizeClaimsOnChain(phone, walletAddress);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[reauthorize] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

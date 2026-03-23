@@ -5,7 +5,7 @@ import {
 } from "@mui/material";
 import { AccountId } from "@hashgraph/sdk";
 import { useWalletInterface } from "../services/wallets/useWalletInterface";
-import { fetchClaimsByPhone, confirmRedeem, sendOtp, verifyOtp, authorizeTest, fetchHCSMessages } from "../services/api";
+import { fetchClaimsByPhone, confirmRedeem, sendOtp, verifyOtp, authorizeTest, reauthorize, fetchHCSMessages } from "../services/api";
 import {
   CONTRACT_ADDRESSES, CLAIM_REGISTRY_ABI, BOND_TOKEN_ABI,
   HTS_TOKEN_ID, HASHSCAN_TX_URL, EXPECTED_CHAIN_ID,
@@ -46,10 +46,19 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
 
   // Charger les titres automatiquement si déjà lié
   useEffect(() => {
-    if (savedPhone && step === 'verified') {
+    if (savedPhone && step === 'verified' && accountId) {
       setClaimsLoading(true);
       fetchClaimsByPhone(savedPhone)
-        .then(data => { setClaims(data); setSearched(true); })
+        .then(data => {
+          setClaims(data);
+          setSearched(true);
+          // Re-autoriser on-chain les claims non encore enregistrés (créés après la vérification OTP)
+          const evmAddr = toEvmAddress(accountId);
+          const hasUnauthorized = data.some(c => !c.wallet_address);
+          if (hasUnauthorized && evmAddr) {
+            reauthorize(savedPhone, evmAddr).catch(() => {});
+          }
+        })
         .catch(() => { setClaims([]); setSearched(true); })
         .finally(() => setClaimsLoading(false));
     }

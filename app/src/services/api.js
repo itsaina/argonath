@@ -47,6 +47,9 @@ export const verifyOtp = (phone, code, walletAddress) =>
 export const authorizeTest = (phone, walletAddress) =>
   request('/otp/authorize-test', { method: 'POST', body: JSON.stringify({ phone, walletAddress }) });
 
+export const reauthorize = (phone, walletAddress) =>
+  request('/otp/reauthorize', { method: 'POST', body: JSON.stringify({ phone, walletAddress }) });
+
 // Claims — investisseur
 export const fetchClaimsByPhone = (phone) =>
   request(`/claims/phone/${encodeURIComponent(phone)}`);
