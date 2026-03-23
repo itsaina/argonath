@@ -70,7 +70,7 @@ export const REPO_ESCROW_ABI = [
   // Mode A — Lecture
   'function collateralRequired(uint256 offerId) view returns (uint256)',
   'function repayAmount(uint256 offerId) view returns (uint256)',
-  'function offers(uint256) view returns (address lender, uint256 cashAmount, uint256 haircut, uint256 repoRateBps, uint256 durationSeconds, address borrower, uint256 collateralAmount, uint256 maturity, uint256 bondMaturityTimestamp, uint256 marginCallDeadline, uint8 status)',
+  'function offers(uint256) view returns (address lender, uint256 cashAmount, uint256 haircut, uint256 repoRateBps, uint256 durationSeconds, address borrower, uint256 collateralAmount, uint256 maturity, uint256 bondMaturityTimestamp, uint8 status)',
   'function offerCount() view returns (uint256)',
   // Mode B — Borrow Request (bondMaturityTimestamp lu depuis BondMetadata on-chain)
   'function createBorrowRequest(uint256 collateralAmount, uint256 desiredCash, uint256 maxRateBps, uint256 durationSeconds) returns (uint256)',
@@ -83,7 +83,7 @@ export const REPO_ESCROW_ABI = [
   'function claimDefaultRequest(uint256 requestId)',
   // Mode B — Lecture
   'function repayRequestAmount(uint256 requestId) view returns (uint256)',
-  'function borrowRequests(uint256) view returns (address borrower, uint256 collateralLocked, uint256 desiredCash, uint256 maxRateBps, uint256 durationSeconds, uint256 bondMaturityTimestamp, address lender, uint256 actualCash, uint256 actualRateBps, uint256 maturity, uint256 marginCallDeadline, address acceptedLender, uint8 status)',
+  'function borrowRequests(uint256) view returns (address borrower, uint256 collateralLocked, uint256 desiredCash, uint256 maxRateBps, uint256 durationSeconds, uint256 bondMaturityTimestamp, address lender, uint256 actualCash, uint256 actualRateBps, uint256 maturity, uint8 status)',
   'function requestCount() view returns (uint256)',
   // Events Mode A
   'event LendingOfferCreated(uint256 indexed offerId, address indexed lender, uint256 cashAmount, uint256 haircut, uint256 repoRateBps, uint256 durationSeconds)',
