@@ -13,6 +13,7 @@ Argonath V3/
 │   ├── BondToken.sol       — ARGN token (ERC-20, 0 decimals, HTS-compatible)
 │   ├── BondMetadata.sol    — on-chain bond maturity registry per wallet
 │   ├── RepoEscrow.sol      — bilateral repo escrow (Mode A + Mode B)
+│   ├── RepoReceiptNFT.sol  — ERC-721 proof of collateral ownership (minted to lender)
 │   └── MockCash.sol        — wMGA stablecoin mock (testing / PoC)
 ├── scripts/            # Hardhat deployment scripts
 │   ├── deploy.js           — deploys all contracts + updates .env files
@@ -41,11 +42,11 @@ Argonath V3/
 
 | Layer | Technology |
 |---|---|
-| Smart contracts | Solidity 0.8.28, Hardhat 2.x, OpenZeppelin 5.x |
+| Smart contracts | Solidity 0.8.28, Hardhat 2.x (viaIR + optimizer, evmVersion paris) |
 | EVM target | Hedera testnet (chainId `296` / `0x128`), Hardhat local (`31337`) |
 | Token standard | ERC-20 (0 decimals) + HTS via HIP-218 |
 | Notarization | Hedera Consensus Service (HCS) — immutable off-chain proofs |
-| Backend | Node.js 20, Express 4, better-sqlite3 / PostgreSQL (pg) |
+| Backend | Node.js 20, Express 4, SQLite (better-sqlite3) — persistent on Railway via volume `/data` |
 | Investor auth | WhatsApp OTP via Verifyway API |
 | Frontend | React 18, Create React App + CRACO, MUI v5, ethers v5 |
 | Wallets | MetaMask (window.ethereum) + WalletConnect / Hedera Wallet Connect |
@@ -69,7 +70,7 @@ Bilateral escrow for repo operations. Two modes:
 
 **Mode A — Lending Offer**: lender locks wMGA → borrower accepts (atomic DvP).
 
-**Mode B — Borrow Request**: borrower locks ARGN → lenders submit proposals → funding after on-chain whitelist (`setAcceptedLender`, anti-frontrunning).
+**Mode B — Borrow Request**: borrower locks ARGN → lenders submit proposals off-chain → borrower accepts → lender funds (DvP + NFT receipt).
 
 State machine:
 ```
@@ -79,6 +80,16 @@ Open → Active → MarginCalled → Repaid
 ```
 
 Interest calculation: **ACT/365** — `cashAmount × rateBps × durationSeconds / (10000 × 31536000)`
+
+### RepoReceiptNFT (REPO-RCT)
+ERC-721 minted to the lender when funding a Borrow Request. Acts as proof of ownership of the collateral held in escrow (tri-party repo model).
+
+**Lifecycle:**
+- **Minted** at `fundRequest()` — lender receives NFT with on-chain metadata (requestId, collateral amount, borrower, cash, rate, maturity)
+- **Burned** at `repayRequest()` — borrower repays, collateral returned, NFT destroyed atomically
+- **Burned** at `claimDefaultRequest()` — lender receives collateral, NFT destroyed
+
+The burn is in the same transaction as the token transfers — impossible to hold an NFT for collateral that has been returned.
 
 ### MockCash (wMGA)
 ERC-20 with 6 decimals simulating wMGA (tokenized Malagasy ariary). Freely mintable — PoC only.
@@ -156,6 +167,7 @@ REACT_APP_CLAIM_REGISTRY_ADDRESS=0x...
 REACT_APP_BOND_TOKEN_ADDRESS=0x...      # EVM address of the HTS token (via HIP-218)
 REACT_APP_REPO_ESCROW_ADDRESS=0x...
 REACT_APP_BOND_METADATA_ADDRESS=0x...
+REACT_APP_REPO_RECEIPT_ADDRESS=0x...        # RepoReceiptNFT (ERC-721)
 REACT_APP_HTS_TOKEN_ID=0.0.XXXXX
 REACT_APP_RPC_URL=https://testnet.hashio.io/api
 REACT_APP_CHAIN_ID=0x128                # 0x128 = Hedera testnet | 0x7a69 = Hardhat local
@@ -226,6 +238,35 @@ The script:
 4. Mints 1M wMGA to the deployer
 5. Updates `app/.env` and `backend/.env`
 
+### Redeploy RepoEscrow + RepoReceiptNFT only
+
+```bash
+HEDERA_PRIVATE_KEY=0x... npx hardhat run scripts/deploy-escrow.js --network hedera_testnet
+```
+
+This deploys BondMetadata, RepoEscrow, RepoReceiptNFT, links them, and associates the HTS token. Remember to register bond maturities on the new BondMetadata via `setMaturity()`.
+
+### Verify a Repo Receipt NFT
+
+```bash
+node -e "
+const { ethers } = require('ethers');
+const p = new ethers.JsonRpcProvider('https://testnet.hashio.io/api');
+const nft = new ethers.Contract('0x7a4DD130f3B5e0a5691964e7F70906d60e0F9fe2', [
+  'function ownerOf(uint256) view returns (address)',
+  'function receipts(uint256) view returns (uint256,uint256,address,uint256,uint256,uint256)',
+], p);
+nft.receipts(1).then(r => console.log({
+  requestId: Number(r[0]),
+  collateral: Number(r[1])+' ARGN',
+  borrower: r[2],
+  cash: (Number(r[3])/1e6)+' wMGA',
+  rate: (Number(r[4])/100)+'%/yr',
+  maturity: new Date(Number(r[5])*1000).toLocaleDateString()
+}));
+"
+```
+
 ---
 
 ## Contract Tests
@@ -294,9 +335,11 @@ Set all variables from `app/.env` in the Railway service environment.
 ### Borrower — Borrow Request (Mode B)
 1. Approve ARGN on RepoEscrow
 2. `createBorrowRequest(collateralAmount, desiredCash, maxRateBps, durationSeconds)`
-3. Lenders submit proposals in the UI
-4. Borrower accepts → `setAcceptedLender()` on-chain (anti-frontrunning)
-5. Lender calls `fundRequest()` → wMGA sent to borrower
+3. Lenders submit proposals in the UI (off-chain via API)
+4. Borrower accepts a proposal (off-chain, rejects others)
+5. Lender calls `fundRequest()` → wMGA sent to borrower + **Repo Receipt NFT minted to lender**
+6. At maturity: borrower repays → NFT burned + ARGN returned
+7. Default: lender claims → NFT burned + ARGN transferred to lender
 
 ### Repo Lifecycle — Repayment / Default
 - At maturity: lender can call `triggerMarginCall()` → state becomes `MarginCalled`
@@ -371,6 +414,23 @@ Personal data is never published in plaintext — only cryptographic proofs (`ke
 | GET | `/api/health` | Health check |
 
 ---
+
+## Current Deployment (Hedera Testnet)
+
+| Service | URL |
+|---|---|
+| Frontend | `https://argonath.dimension-labs.xyz` |
+| Backend | `https://argonath-production-2a15.up.railway.app` |
+| Health check | `GET /api/health` → `{ status: "ok", version: "3.0.0-receipt-nft" }` |
+
+| Contract | Address |
+|---|---|
+| RepoEscrow | `0xfD099E86Ff1C1191D688fAb51E50da6d2E29f835` |
+| RepoReceiptNFT | `0x7a4DD130f3B5e0a5691964e7F70906d60e0F9fe2` |
+| BondMetadata | `0xEa74F4E46baBf1d0FCb7641731627B8A6431574f` |
+| MockCash | `0x62ab875383139793D8e28417C614df756059F583` |
+| BondToken (ARGN) | `0x00000000000000000000000000000000007f082b` (HTS `0.0.8325163`) |
+| ClaimRegistry | `0xE0138399F66aeD2e178A7e9CE6b58F0d6fAb244B` |
 
 ## License
 

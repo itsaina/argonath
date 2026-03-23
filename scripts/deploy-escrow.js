@@ -67,12 +67,23 @@ async function main() {
   const repoEscrowAddr = await repoEscrow.getAddress();
   console.log("   RepoEscrow :", repoEscrowAddr);
 
-  // 3. Transférer ownership de BondMetadata au backend (deployer conserve l'ownership ici)
-  //    Le backend utilise la clé privée du deployer → pas de transfert nécessaire.
+  // 3. Déploiement RepoReceiptNFT (référence RepoEscrow)
+  console.log("\n3. Déploiement RepoReceiptNFT...");
+  const RepoReceiptNFT = await ethers.getContractFactory("RepoReceiptNFT");
+  const repoReceipt = await RepoReceiptNFT.deploy(repoEscrowAddr, TX_OPTS);
+  await repoReceipt.waitForDeployment();
+  const repoReceiptAddr = await repoReceipt.getAddress();
+  console.log("   RepoReceiptNFT :", repoReceiptAddr);
 
-  // 4. Hedera : associer RepoEscrow au token ARGN
+  // 4. Lier RepoEscrow → RepoReceiptNFT
+  console.log("\n4. setRepoReceipt sur RepoEscrow...");
+  const setReceiptTx = await repoEscrow.setRepoReceipt(repoReceiptAddr, TX_OPTS);
+  await setReceiptTx.wait();
+  console.log("   ✓ RepoReceipt lié à RepoEscrow");
+
+  // 5. Hedera : associer RepoEscrow au token ARGN
   if (isHedera) {
-    console.log("\n3. Association RepoEscrow <-> ARGN (HTS)...");
+    console.log("\n5. Association RepoEscrow <-> ARGN (HTS)...");
     try {
       const assocTx = await repoEscrow.associateWithBondToken(TX_OPTS);
       await assocTx.wait();
@@ -82,22 +93,25 @@ async function main() {
     }
   }
 
-  // 5. Mise à jour des .env
+  // 6. Mise à jour des .env
   updateEnv(appEnvPath, {
-    REACT_APP_REPO_ESCROW_ADDRESS:  repoEscrowAddr,
+    REACT_APP_REPO_ESCROW_ADDRESS:   repoEscrowAddr,
     REACT_APP_BOND_METADATA_ADDRESS: bondMetadataAddr,
+    REACT_APP_REPO_RECEIPT_ADDRESS:  repoReceiptAddr,
   });
   updateEnv(backendEnvPath, {
     BOND_METADATA_ADDRESS: bondMetadataAddr,
   });
 
   console.log("\n✓ app/.env et backend/.env mis à jour");
-  console.log("  REACT_APP_REPO_ESCROW_ADDRESS  =", repoEscrowAddr);
-  console.log("  REACT_APP_BOND_METADATA_ADDRESS =", bondMetadataAddr);
+  console.log("  REACT_APP_REPO_ESCROW_ADDRESS   =", repoEscrowAddr);
+  console.log("  REACT_APP_BOND_METADATA_ADDRESS  =", bondMetadataAddr);
+  console.log("  REACT_APP_REPO_RECEIPT_ADDRESS   =", repoReceiptAddr);
   if (isHedera) {
     console.log("\nHashScan:");
-    console.log("  BondMetadata :", `https://hashscan.io/testnet/contract/${bondMetadataAddr}`);
-    console.log("  RepoEscrow   :", `https://hashscan.io/testnet/contract/${repoEscrowAddr}`);
+    console.log("  BondMetadata    :", `https://hashscan.io/testnet/contract/${bondMetadataAddr}`);
+    console.log("  RepoEscrow      :", `https://hashscan.io/testnet/contract/${repoEscrowAddr}`);
+    console.log("  RepoReceiptNFT  :", `https://hashscan.io/testnet/contract/${repoReceiptAddr}`);
   }
 }
 

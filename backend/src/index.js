@@ -27,7 +27,7 @@ app.use('/api/otp', otpRoutes);
 app.use('/api/repo', repoRoutes);
 app.use('/api/hcs', hcsRoutes);
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', version: '2.1.0' }));
+app.get('/api/health', (req, res) => res.json({ status: 'ok', version: '3.0.0-receipt-nft' }));
 
 app.listen(PORT, () => {
   console.log(`Argonath backend running on http://localhost:${PORT}`);

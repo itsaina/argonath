@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./RepoReceiptNFT.sol";
 
 /// @dev Interface minimale vers BondMetadata
 interface IBondMetadata {
@@ -34,9 +35,10 @@ interface IBondMetadata {
 /// Hypothèse PoC : 1 ARGN = 1 MGA nominal, wMGA a 6 décimales (1 MGA = 1e6 wMGA units).
 contract RepoEscrow {
 
-    IERC20        public bondToken;    // ARGN (ERC-20 / HTS via HIP-218)
-    IERC20        public cashToken;    // wMGA (ERC-20, 6 décimales)
-    IBondMetadata public bondMetadata; // Registre de maturités — renseigné par le dépositaire
+    IERC20          public bondToken;    // ARGN (ERC-20 / HTS via HIP-218)
+    IERC20          public cashToken;    // wMGA (ERC-20, 6 décimales)
+    IBondMetadata   public bondMetadata; // Registre de maturités — renseigné par le dépositaire
+    RepoReceiptNFT  public repoReceipt;  // NFT titre de propriété du collatéral
 
     uint256 public constant CASH_DECIMALS     = 1e6;
     /// @notice Fenêtre de réponse accordée à l'emprunteur après un margin call (close-out period).
@@ -106,6 +108,12 @@ contract RepoEscrow {
         bondToken    = IERC20(_bondToken);
         cashToken    = IERC20(_cashToken);
         bondMetadata = IBondMetadata(_bondMetadata);
+    }
+
+    /// @notice Définit le contrat RepoReceiptNFT. Appelé une fois après déploiement.
+    function setRepoReceipt(address _repoReceipt) external {
+        require(address(repoReceipt) == address(0), "RepoEscrow: receipt already set");
+        repoReceipt = RepoReceiptNFT(_repoReceipt);
     }
 
     /// @notice Associe ce contrat au token ARGN (HTS) via le HTS Precompile.
@@ -375,6 +383,18 @@ contract RepoEscrow {
         req.maturity      = block.timestamp + req.durationSeconds;
         req.status        = Status.Active;
 
+        // Mint le Repo Receipt NFT au prêteur (titre de propriété du collatéral en escrow)
+        if (address(repoReceipt) != address(0)) {
+            repoReceipt.mint(msg.sender, RepoReceiptNFT.ReceiptData({
+                requestId:        requestId,
+                collateralAmount: req.collateralLocked,
+                borrower:         req.borrower,
+                actualCash:       actualCash,
+                actualRateBps:    actualRateBps,
+                maturity:         req.maturity
+            }));
+        }
+
         emit RequestFunded(requestId, msg.sender, actualCash, actualRateBps, req.maturity);
     }
 
@@ -413,6 +433,11 @@ contract RepoEscrow {
             "RepoEscrow: collateral restitution failed"
         );
 
+        // Burn le Repo Receipt NFT (le collatéral est restitué, le titre n'a plus de valeur)
+        if (address(repoReceipt) != address(0)) {
+            repoReceipt.burn(requestId);
+        }
+
         req.status = Status.Repaid;
         emit RequestRepaid(requestId, total);
     }
@@ -441,6 +466,11 @@ contract RepoEscrow {
             bondToken.transfer(req.lender, req.collateralLocked),
             "RepoEscrow: collateral transfer failed"
         );
+
+        // Burn le Repo Receipt NFT (le collatéral est transféré au prêteur, le titre n'a plus de valeur)
+        if (address(repoReceipt) != address(0)) {
+            repoReceipt.burn(requestId);
+        }
 
         req.status = Status.Defaulted;
         emit RequestDefaultClaimed(requestId, req.lender);

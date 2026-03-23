@@ -7,7 +7,7 @@ import {
 import { AccountId } from "@hashgraph/sdk";
 import { useWalletInterface } from "../services/wallets/useWalletInterface";
 import {
-  CONTRACT_ADDRESSES, REPO_ESCROW_ABI, MOCK_CASH_ABI, BOND_TOKEN_ABI, REPO_STATUS, HTS_PRECOMPILE,
+  CONTRACT_ADDRESSES, REPO_ESCROW_ABI, MOCK_CASH_ABI, BOND_TOKEN_ABI, REPO_RECEIPT_ABI, REPO_STATUS, HTS_PRECOMPILE,
 } from "../services/contracts";
 import { ContractFunctionParameterBuilder } from "../services/wallets/contractFunctionParameterBuilder";
 import { ethers } from "ethers";
@@ -40,6 +40,15 @@ function estimateRepay(cashAmount, rateBps, durationSeconds) {
 }
 
 const GRACE_MS = 24 * 3600 * 1000;
+
+async function getReceiptOwner(requestId) {
+  if (!CONTRACT_ADDRESSES.RepoReceipt) return null;
+  try {
+    const provider = getProvider();
+    const nft = new ethers.Contract(CONTRACT_ADDRESSES.RepoReceipt, REPO_RECEIPT_ABI, provider);
+    return await nft.ownerOf(requestId);
+  } catch { return null; } // reverts si brûlé ou pas encore minté
+}
 
 function getProvider() {
   return new ethers.providers.JsonRpcProvider(
@@ -105,13 +114,12 @@ function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
   const borrowerAddr = offer.borrower?.toLowerCase();
 
   const maturityDate = Number(offer.maturity) > 0 ? new Date(Number(offer.maturity) * 1000) : null;
-  const marginDeadline = Number(offer.marginCallDeadline) > 0 ? new Date(Number(offer.marginCallDeadline) * 1000) : null;
   // Le lender peut trigger le margin call dès que le repo est matured (statut Active)
   const canTriggerMarginCall = statusLabel === 'Active' && maturityDate && Date.now() >= maturityDate.getTime();
-  // Le lender peut claim default uniquement après MarginCalled + deadline expiré
-  const isDefaultable = statusLabel === 'MarginCalled' && marginDeadline && Date.now() > marginDeadline.getTime();
-  // Alerte "deadline bientôt" si en MarginCalled et deadline pas encore passée
-  const isInMarginGrace = statusLabel === 'MarginCalled' && marginDeadline && Date.now() <= marginDeadline.getTime();
+  // Le lender peut claim default dès que le statut est MarginCalled (le contrat enforce la grace period)
+  const isDefaultable = statusLabel === 'MarginCalled' && isLender;
+  // Alerte margin call active pour l'emprunteur
+  const isInMarginGrace = statusLabel === 'MarginCalled' && isBorrower;
   const isLender = evmAccount && evmAccount === lenderAddr;
   const isBorrower = evmAccount && evmAccount === borrowerAddr;
 
@@ -263,7 +271,7 @@ function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
 
         {isInMarginGrace && (
           <Alert severity="warning" sx={{ py: 0, fontSize: '0.8rem' }}>
-            ⚠️ Margin Call — repay before {marginDeadline?.toLocaleTimeString()} or lender claims collateral.
+            ⚠️ Margin Call — repay now or lender will claim collateral.
           </Alert>
         )}
         {txStatus === 'success' && <Alert severity="success" sx={{ py: 0 }}>Transaction sent ✓</Alert>}
@@ -373,16 +381,27 @@ function CreateLendingOfferSection({ accountId, walletInterface, onCreated }) {
           public: { cashMGA: Number(form.cashMGA), repoRate: Number(form.repoRate), haircut: Number(form.haircut), durationDays: Number(form.durationDays), label: 'Lending offer created' },
         });
         try {
-          await new Promise(r => setTimeout(r, 4000));
           const provider = getProvider();
           const contract = new ethers.Contract(CONTRACT_ADDRESSES.RepoEscrow, REPO_ESCROW_ABI, provider);
-          const count = Number(await contract.offerCount());
-          const offerId = count - 1;
-          await saveRepoOffer({
-            offerId, lender: evmAddr, cashAmount: Number(cashAmount),
-            repoRateBps, haircutBps, durationSec: durationSecs,
-            contractAddr: CONTRACT_ADDRESSES.RepoEscrow,
-          });
+          let offerId = -1;
+          for (let i = 0; i < 15; i++) {
+            await new Promise(r => setTimeout(r, 3000));
+            const count = Number(await contract.offerCount());
+            if (count > 0) {
+              const candidate = count - 1;
+              const offer = await contract.offers(candidate);
+              if (offer.lender?.toLowerCase() === evmAddr?.toLowerCase()) {
+                offerId = candidate; break;
+              }
+            }
+          }
+          if (offerId >= 0) {
+            await saveRepoOffer({
+              offerId, lender: evmAddr, cashAmount: Number(cashAmount),
+              repoRateBps, haircutBps, durationSec: durationSecs,
+              contractAddr: CONTRACT_ADDRESSES.RepoEscrow,
+            });
+          }
         } catch {}
         setForm({ cashMGA: '', repoRate: '8', haircut: '10', durationDays: '7' }); onCreated();
       }
@@ -520,17 +539,10 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
   const handleAccept = async (proposal) => {
     setActionId(proposal.id);
     try {
-      // 1. Accepter dans la DB off-chain
+      // Accepter dans la DB off-chain
       await acceptProposal(proposal.id);
-      // 2. Whitelist le prêteur on-chain (protège contre front-running sur fundRequest)
-      if (walletInterface && CONTRACT_ADDRESSES.RepoEscrow) {
-        const acceptLenderParams = new ContractFunctionParameterBuilder()
-          .addParam({ type: 'uint256', name: 'requestId', value: requestId })
-          .addParam({ type: 'address', name: 'lender',    value: proposal.lender_address });
-        await walletInterface.executeContractFunction(
-          CONTRACT_ADDRESSES.RepoEscrow, 'setAcceptedLender', acceptLenderParams, 150_000
-        );
-      }
+      // Note : setAcceptedLender (anti front-running) désactivé — absent du contrat déployé.
+      // Sera rétabli après redéploiement du contrat avec le champ acceptedLender.
       await load();
     } catch (e) { alert(e.message); }
     setActionId('');
@@ -602,7 +614,7 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
             <Typography variant="body2">
               {(accepted.cash_amount / 1e6).toFixed(2)} wMGA · {(accepted.rate_bps / 100).toFixed(2)} %/yr
             </Typography>
-            {fundStatus === 'success' && <Alert severity="success" sx={{ py: 0 }}>Funding confirmed ✓</Alert>}
+            {fundStatus === 'success' && <Alert severity="success" sx={{ py: 0 }}>Funding confirmed — Repo Receipt NFT minted to your wallet ✓</Alert>}
             {fundStatus === 'error'   && <Alert severity="error"   sx={{ py: 0 }}>Funding failed</Alert>}
             <Button variant="contained" size="small" disabled={fundStatus === 'loading' || fundStatus === 'success'}
               onClick={() => handleFund(accepted)}
@@ -661,6 +673,7 @@ function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefre
   const [txStatus, setTxStatus] = useState('');
   const [showProposalDialog, setShowProposalDialog] = useState(false);
   const [proposalRefresh, setProposalRefresh] = useState(0);
+  const [receiptOwner, setReceiptOwner] = useState(null);
 
   const statusLabel = REPO_STATUS[Number(req.status)] || 'Open';
   const chip = STATUS_CHIP[statusLabel] || STATUS_CHIP.Open;
@@ -668,13 +681,21 @@ function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefre
   const borrowerAddr = req.borrower?.toLowerCase();
   const lenderAddr = req.lender?.toLowerCase();
 
+  // Vérifier si un Repo Receipt NFT existe pour cette request
+  useEffect(() => {
+    if (statusLabel === 'Active' || statusLabel === 'MarginCalled') {
+      getReceiptOwner(requestId).then(setReceiptOwner);
+    }
+  }, [requestId, statusLabel]);
+
   const isBorrower = evmAccount && evmAccount === borrowerAddr;
   const isLender   = evmAccount && evmAccount === lenderAddr;
   const maturityDate = Number(req.maturity) > 0 ? new Date(Number(req.maturity) * 1000) : null;
-  const marginDeadline = Number(req.marginCallDeadline) > 0 ? new Date(Number(req.marginCallDeadline) * 1000) : null;
   const canTriggerMarginCall = statusLabel === 'Active' && maturityDate && Date.now() >= maturityDate.getTime();
-  const isDefaultable = statusLabel === 'MarginCalled' && marginDeadline && Date.now() > marginDeadline.getTime();
-  const isInMarginGrace = statusLabel === 'MarginCalled' && marginDeadline && Date.now() <= marginDeadline.getTime();
+  // Le lender peut claim default dès que le statut est MarginCalled (le contrat enforce la grace period)
+  const isDefaultable = statusLabel === 'MarginCalled' && isLender;
+  // Alerte margin call active pour l'emprunteur
+  const isInMarginGrace = statusLabel === 'MarginCalled' && isBorrower;
 
   const repayEstimate = statusLabel === 'Active'
     ? estimateRepay(req.actualCash, req.actualRateBps, req.durationSeconds)
@@ -757,9 +778,19 @@ function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefre
             <Typography variant="h6" fontWeight={700} color="#03045e">
               {Number(req.collateralLocked).toLocaleString()} ARGN
             </Typography>
-            <Typography variant="caption" color="#888">collateral locked</Typography>
+            <Typography variant="caption" color="#888">
+              {receiptOwner ? 'collateral in escrow (NFT issued)' : 'collateral locked'}
+            </Typography>
           </Stack>
         </Stack>
+
+        {/* Repo Receipt NFT badge */}
+        {receiptOwner && (statusLabel === 'Active' || statusLabel === 'MarginCalled') && (
+          <Alert severity="info" sx={{ py: 0, fontSize: '0.8rem' }} icon={false}>
+            <b>Repo Receipt NFT #{requestId}</b> — held by {receiptOwner?.slice(0, 10)}…
+            {isLender && <span style={{ color: '#2e7d32', fontWeight: 700 }}> (you)</span>}
+          </Alert>
+        )}
 
         {/* Details row */}
         <Stack direction="row" spacing={3} flexWrap="wrap">
@@ -811,7 +842,7 @@ function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefre
 
         {isInMarginGrace && (
           <Alert severity="warning" sx={{ py: 0, fontSize: '0.8rem' }}>
-            ⚠️ Margin Call — repay before {marginDeadline?.toLocaleTimeString()} or lender claims collateral.
+            ⚠️ Margin Call — repay now or lender will claim collateral.
           </Alert>
         )}
         {txStatus === 'success' && <Alert severity="success" sx={{ py: 0 }}>Transaction sent ✓</Alert>}
@@ -854,7 +885,7 @@ function BorrowRequestCard({ req, requestId, accountId, walletInterface, onRefre
           )}
         </Stack>
 
-        {statusLabel === 'Open' && (isBorrower || isLender) && (
+        {statusLabel === 'Open' && accountId && (
           <>
             <Divider />
             <ProposalsPanel
@@ -925,16 +956,28 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
           public: { collateral: collateralAmount, desiredMGA: form.desiredMGA, maxRate: form.maxRate, durationDays: form.durationDays, label: 'Borrow request created' },
         });
         try {
-          await new Promise(r => setTimeout(r, 4000));
           const provider = getProvider();
           const contract = new ethers.Contract(CONTRACT_ADDRESSES.RepoEscrow, REPO_ESCROW_ABI, provider);
-          const count = Number(await contract.requestCount());
-          const requestId = count - 1;
-          await saveRepoRequest({
-            requestId, borrower: evmAddr, collateralAmount,
-            desiredCash: Number(desiredCash), maxRateBps, durationSec: durationSecs,
-            bondMaturityDate: '', contractAddr: CONTRACT_ADDRESSES.RepoEscrow,
-          });
+          // Poll requestCount() jusqu'à ce que Hedera reflète la nouvelle tx
+          let requestId = -1;
+          for (let i = 0; i < 15; i++) {
+            await new Promise(r => setTimeout(r, 3000));
+            const count = Number(await contract.requestCount());
+            if (count > 0) {
+              const candidate = count - 1;
+              const req = await contract.borrowRequests(candidate);
+              if (req.borrower?.toLowerCase() === evmAddr?.toLowerCase()) {
+                requestId = candidate; break;
+              }
+            }
+          }
+          if (requestId >= 0) {
+            await saveRepoRequest({
+              requestId, borrower: evmAddr, collateralAmount,
+              desiredCash: Number(desiredCash), maxRateBps, durationSec: durationSecs,
+              bondMaturityDate: '', contractAddr: CONTRACT_ADDRESSES.RepoEscrow,
+            });
+          }
         } catch {}
         setForm({ collateral: '', desiredMGA: '', maxRate: '8', durationDays: '7' }); onCreated();
       }

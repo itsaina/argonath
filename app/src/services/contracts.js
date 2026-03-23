@@ -9,6 +9,7 @@ export const CONTRACT_ADDRESSES = {
   BondToken:     process.env.REACT_APP_BOND_TOKEN_ADDRESS      || '', // adresse EVM du token HTS ARGN (HIP-218)
   RepoEscrow:    process.env.REACT_APP_REPO_ESCROW_ADDRESS     || '',
   BondMetadata:  process.env.REACT_APP_BOND_METADATA_ADDRESS   || '',
+  RepoReceipt:   process.env.REACT_APP_REPO_RECEIPT_ADDRESS    || '', // NFT titre de propriété collatéral
 };
 
 // HTS
@@ -53,8 +54,9 @@ export const CLAIM_REGISTRY_ABI = [
 
 // ─── RepoEscrow ───────────────────────────────────────────────────────────────
 export const REPO_ESCROW_ABI = [
-  // Setup Hedera HTS
+  // Setup
   'function associateWithBondToken()',
+  'function setRepoReceipt(address _repoReceipt)',
   // Constantes
   'function MARGIN_CALL_GRACE() view returns (uint256)',
   'function MAX_REPO_DURATION() view returns (uint256)',
@@ -70,7 +72,7 @@ export const REPO_ESCROW_ABI = [
   // Mode A — Lecture
   'function collateralRequired(uint256 offerId) view returns (uint256)',
   'function repayAmount(uint256 offerId) view returns (uint256)',
-  'function offers(uint256) view returns (address lender, uint256 cashAmount, uint256 haircut, uint256 repoRateBps, uint256 durationSeconds, address borrower, uint256 collateralAmount, uint256 maturity, uint256 bondMaturityTimestamp, uint8 status)',
+  'function offers(uint256) view returns (address lender, uint256 cashAmount, uint256 haircut, uint256 repoRateBps, uint256 durationSeconds, address borrower, uint256 collateralAmount, uint256 maturity, uint256 bondMaturityTimestamp, uint256 marginCallDeadline, uint8 status)',
   'function offerCount() view returns (uint256)',
   // Mode B — Borrow Request (bondMaturityTimestamp lu depuis BondMetadata on-chain)
   'function createBorrowRequest(uint256 collateralAmount, uint256 desiredCash, uint256 maxRateBps, uint256 durationSeconds) returns (uint256)',
@@ -83,7 +85,7 @@ export const REPO_ESCROW_ABI = [
   'function claimDefaultRequest(uint256 requestId)',
   // Mode B — Lecture
   'function repayRequestAmount(uint256 requestId) view returns (uint256)',
-  'function borrowRequests(uint256) view returns (address borrower, uint256 collateralLocked, uint256 desiredCash, uint256 maxRateBps, uint256 durationSeconds, uint256 bondMaturityTimestamp, address lender, uint256 actualCash, uint256 actualRateBps, uint256 maturity, uint8 status)',
+  'function borrowRequests(uint256) view returns (address borrower, uint256 collateralLocked, uint256 desiredCash, uint256 maxRateBps, uint256 durationSeconds, uint256 bondMaturityTimestamp, address lender, uint256 actualCash, uint256 actualRateBps, uint256 maturity, uint256 marginCallDeadline, address acceptedLender, uint8 status)',
   'function requestCount() view returns (uint256)',
   // Events Mode A
   'event LendingOfferCreated(uint256 indexed offerId, address indexed lender, uint256 cashAmount, uint256 haircut, uint256 repoRateBps, uint256 durationSeconds)',
@@ -100,6 +102,16 @@ export const REPO_ESCROW_ABI = [
   'event MarginCallTriggeredRequest(uint256 indexed requestId, uint256 deadline)',
   'event RequestDefaultClaimed(uint256 indexed requestId, address indexed lender)',
   'event RequestCancelled(uint256 indexed requestId)',
+];
+
+// ─── RepoReceiptNFT (ERC-721 — titre de propriété du collatéral) ────────────
+export const REPO_RECEIPT_ABI = [
+  'function ownerOf(uint256 tokenId) view returns (address)',
+  'function balanceOf(address owner) view returns (uint256)',
+  'function tokenURI(uint256 tokenId) view returns (string)',
+  'function receipts(uint256) view returns (uint256 requestId, uint256 collateralAmount, address borrower, uint256 actualCash, uint256 actualRateBps, uint256 maturity)',
+  'event ReceiptMinted(uint256 indexed tokenId, address indexed lender, uint256 collateralAmount)',
+  'event ReceiptBurned(uint256 indexed tokenId)',
 ];
 
 // Statuts RepoEscrow (enum — communs aux deux modes)
