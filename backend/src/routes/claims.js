@@ -273,7 +273,14 @@ router.post('/:id/confirm-redeem', async (req, res) => {
     if (registryAddress && rpcUrl) {
       try {
         const provider = new ethers.JsonRpcProvider(rpcUrl);
-        const receipt = await provider.getTransactionReceipt(txHash);
+
+        // Retry jusqu'à 10x avec 3s d'intervalle (Hedera testnet peut être lent à indexer)
+        let receipt = null;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          receipt = await provider.getTransactionReceipt(txHash);
+          if (receipt) break;
+          await new Promise(r => setTimeout(r, 3000));
+        }
         if (!receipt) {
           return res.status(400).json({ error: 'Transaction introuvable on-chain' });
         }
