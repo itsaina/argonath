@@ -1,4 +1,4 @@
-# Argonath V3
+# Argonath
 
 On-chain tokenization platform for financial securities (T-Bills, government bonds) and bilateral repo market, deployed on **Hedera EVM testnet**.
 
