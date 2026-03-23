@@ -80,6 +80,10 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
             }
           } catch (err) {
             console.warn('[reauthorize]', err.message);
+            // Si reauthorize échoue (403 = aucun wallet vérifié en DB), forcer re-OTP
+            if (storageKey) localStorage.removeItem(storageKey);
+            setStep('phone');
+            setPhone(savedPhone || '');
           } finally {
             setReauthorizing(false);
           }

@@ -260,33 +260,25 @@ router.post('/:id/confirm-redeem', async (req, res) => {
       return res.status(409).json({ error: 'Already redeemed' });
     }
 
-    // 3. Wallet doit avoir été enregistré via OTP — jamais fourni par le body
-    if (!claim.wallet_address) {
-      return res.status(403).json({ error: 'Wallet non autorisé — effectuez la vérification OTP d\'abord' });
-    }
-
-    // 4. Vérification on-chain : la tx doit contenir ClaimRedeemed(claimId, wallet, amount)
-    //    émis par l'adresse ClaimRegistry, avec le claimId et le wallet correspondant au claim.
+    // 3. Vérification on-chain : la tx doit contenir ClaimRedeemed(claimId, wallet, amount)
+    //    L'event on-chain est la source de vérité — le wallet est extrait de l'event (pas du body).
     //    Optionnel si CLAIM_REGISTRY_ADDRESS ou RPC_URL absent (environnement dev sans contrats).
     const registryAddress = process.env.CLAIM_REGISTRY_ADDRESS;
     const rpcUrl = process.env.RPC_URL;
+    let verifiedWallet = claim.wallet_address; // fallback sur la DB
+
     if (registryAddress && rpcUrl) {
       try {
         const provider = new ethers.JsonRpcProvider(rpcUrl);
 
-        // Convertit un Hedera transaction ID (0.0.XXXX@S.N ou 0.0.XXXX-S-N) en EVM hash
-        // via le mirror node — nécessaire pour les wallets WalletConnect/HashPack
+        // Convertit un Hedera transaction ID (0.0.XXXX@S.N) en EVM hash via mirror node
         let evmHash = txHash;
         if (/^0\.0\.\d+[@\-]\d+[\.\-]\d+/.test(txHash)) {
-          const normalized = txHash.replace('@', '-').replace('.', '-').replace('.', '-');
-          // format mirror node: shard.realm.num-seconds-nanos
           const mirrorId = txHash.replace('@', '-').replace(/\./g, '-');
           try {
-            const mirrorUrl = `https://testnet.mirrornode.hedera.com/api/v1/transactions/${mirrorId}`;
-            const mirrorRes = await fetch(mirrorUrl);
+            const mirrorRes = await fetch(`https://testnet.mirrornode.hedera.com/api/v1/transactions/${mirrorId}`);
             if (mirrorRes.ok) {
-              const mirrorData = await mirrorRes.json();
-              const firstTx = mirrorData?.transactions?.[0];
+              const firstTx = (await mirrorRes.json())?.transactions?.[0];
               if (firstTx?.hash) evmHash = firstTx.hash.startsWith('0x') ? firstTx.hash : '0x' + firstTx.hash;
             }
           } catch (mirrorErr) {
@@ -294,7 +286,7 @@ router.post('/:id/confirm-redeem', async (req, res) => {
           }
         }
 
-        // Retry jusqu'à 10x avec 3s d'intervalle (Hedera testnet peut être lent à indexer)
+        // Retry jusqu'à 10x avec 3s d'intervalle (Hedera testnet peut être lent)
         let receipt = null;
         for (let attempt = 0; attempt < 10; attempt++) {
           receipt = await provider.getTransactionReceipt(evmHash);
@@ -308,45 +300,58 @@ router.post('/:id/confirm-redeem', async (req, res) => {
         const iface = new ethers.Interface([
           'event ClaimRedeemed(bytes32 indexed claimId, address indexed wallet, uint256 amount)',
         ]);
-        const expectedClaimId = ethers.id(claim.batch_id); // keccak256(batch_id)
+        const expectedClaimId = ethers.id(claim.batch_id);
 
-        const found = receipt.logs.some(log => {
+        // Cherche l'event ClaimRedeemed et extrait le wallet vérifié
+        let eventWallet = null;
+        for (const log of receipt.logs) {
           try {
-            if (log.address.toLowerCase() !== registryAddress.toLowerCase()) return false;
+            if (log.address.toLowerCase() !== registryAddress.toLowerCase()) continue;
             const parsed = iface.parseLog({ topics: log.topics, data: log.data });
-            return (
-              parsed.name === 'ClaimRedeemed' &&
-              parsed.args.claimId === expectedClaimId &&
-              parsed.args.wallet.toLowerCase() === claim.wallet_address.toLowerCase()
-            );
-          } catch { return false; }
-        });
+            if (parsed.name === 'ClaimRedeemed' && parsed.args.claimId === expectedClaimId) {
+              eventWallet = parsed.args.wallet;
+              break;
+            }
+          } catch { /* skip */ }
+        }
 
-        if (!found) {
+        if (!eventWallet) {
           return res.status(403).json({ error: 'Event ClaimRedeemed absent ou invalide dans la transaction' });
         }
+
+        // Si wallet_address en DB est set, vérifier qu'il correspond
+        if (claim.wallet_address && eventWallet.toLowerCase() !== claim.wallet_address.toLowerCase()) {
+          return res.status(403).json({ error: 'Le wallet de l\'event on-chain ne correspond pas au wallet autorisé' });
+        }
+
+        // Le wallet on-chain est la source de vérité
+        verifiedWallet = eventWallet;
       } catch (verifyErr) {
         console.error('[confirm-redeem] vérification on-chain échouée:', verifyErr.message);
         return res.status(502).json({ error: 'Impossible de vérifier la transaction on-chain' });
       }
+    } else if (!claim.wallet_address) {
+      // Pas de vérification on-chain possible ET pas de wallet en DB → impossible de continuer
+      return res.status(403).json({ error: 'Wallet non autorisé — effectuez la vérification OTP d\'abord' });
     }
 
-    // 5. Marquer comme redeemed — WHERE status != 'redeemed' garantit l'idempotence en cas de race condition
+    // 5. Marquer comme redeemed + persister wallet_address si absent
     const result = await pool.query(
-      `UPDATE claims SET status = 'redeemed', updated_at = NOW() WHERE id = $1 AND status != 'redeemed' RETURNING *`,
-      [id]
+      `UPDATE claims SET status = 'redeemed', wallet_address = COALESCE(wallet_address, $2), updated_at = NOW() WHERE id = $1 AND status != 'redeemed' RETURNING *`,
+      [id, verifiedWallet]
     );
     if (result.rows.length === 0) {
       return res.status(409).json({ error: 'Already redeemed' });
     }
     const updated = result.rows[0];
 
-    // 6. Mint HTS ARGN — uniquement vers wallet_address enregistré en DB
+    // 6. Mint HTS ARGN — vers le wallet vérifié (on-chain ou DB)
     let htsResult = null;
-    if (process.env.HTS_TOKEN_ID && updated.wallet_address) {
+    const mintTarget = verifiedWallet || updated.wallet_address;
+    if (process.env.HTS_TOKEN_ID && mintTarget) {
       try {
         const mintAmount = Math.round(Number(updated.nominal_amount));
-        htsResult = await mintAndTransfer(updated.wallet_address, mintAmount);
+        htsResult = await mintAndTransfer(mintTarget, mintAmount);
         console.log('[confirm-redeem] HTS mint+transfer OK', htsResult);
       } catch (htsErr) {
         console.error('[confirm-redeem] HTS error (non-bloquant):', htsErr.message);
@@ -354,14 +359,14 @@ router.post('/:id/confirm-redeem', async (req, res) => {
     }
 
     // 7. Enregistre la maturité des bonds dans BondMetadata (lu par RepoEscrow)
-    if (updated.wallet_address && updated.maturity_date) {
-      setBondMaturity(updated.wallet_address, updated.maturity_date);
+    if (mintTarget && updated.maturity_date) {
+      setBondMaturity(mintTarget, updated.maturity_date);
     }
 
     // 8. Notarisation HCS — non bloquante
     if (updated.phone) {
       publishEvent('allocation_redeemed', {
-        wallet:         updated.wallet_address.toLowerCase(),
+        wallet:         (mintTarget || '').toLowerCase(),
         phone_proof:    phoneProof(updated.phone),
         identity_proof: identityProof(updated.first_name, updated.last_name, updated.phone),
         claim_proof:    claimProof(updated.batch_id),
