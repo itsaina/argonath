@@ -274,10 +274,30 @@ router.post('/:id/confirm-redeem', async (req, res) => {
       try {
         const provider = new ethers.JsonRpcProvider(rpcUrl);
 
+        // Convertit un Hedera transaction ID (0.0.XXXX@S.N ou 0.0.XXXX-S-N) en EVM hash
+        // via le mirror node — nécessaire pour les wallets WalletConnect/HashPack
+        let evmHash = txHash;
+        if (/^0\.0\.\d+[@\-]\d+[\.\-]\d+/.test(txHash)) {
+          const normalized = txHash.replace('@', '-').replace('.', '-').replace('.', '-');
+          // format mirror node: shard.realm.num-seconds-nanos
+          const mirrorId = txHash.replace('@', '-').replace(/\./g, '-');
+          try {
+            const mirrorUrl = `https://testnet.mirrornode.hedera.com/api/v1/transactions/${mirrorId}`;
+            const mirrorRes = await fetch(mirrorUrl);
+            if (mirrorRes.ok) {
+              const mirrorData = await mirrorRes.json();
+              const firstTx = mirrorData?.transactions?.[0];
+              if (firstTx?.hash) evmHash = firstTx.hash.startsWith('0x') ? firstTx.hash : '0x' + firstTx.hash;
+            }
+          } catch (mirrorErr) {
+            console.warn('[confirm-redeem] mirror node lookup failed:', mirrorErr.message);
+          }
+        }
+
         // Retry jusqu'à 10x avec 3s d'intervalle (Hedera testnet peut être lent à indexer)
         let receipt = null;
         for (let attempt = 0; attempt < 10; attempt++) {
-          receipt = await provider.getTransactionReceipt(txHash);
+          receipt = await provider.getTransactionReceipt(evmHash);
           if (receipt) break;
           await new Promise(r => setTimeout(r, 3000));
         }
