@@ -205,8 +205,8 @@ router.post('/reauthorize', async (req, res) => {
 
   // Vérifie qu'au moins un claim de ce phone a déjà ce wallet_address (preuve que le wallet a bien été vérifié via OTP)
   const existing = await pool.query(
-    `SELECT 1 FROM claims WHERE phone = $1 AND wallet_address = $2 LIMIT 1`,
-    [phone, walletAddress.toLowerCase()]
+    `SELECT 1 FROM claims WHERE phone = $1 AND lower(wallet_address) = lower($2) LIMIT 1`,
+    [phone, walletAddress]
   );
   if (existing.rows.length === 0) {
     return res.status(403).json({ error: 'Wallet non associé à ce numéro — OTP requis' });

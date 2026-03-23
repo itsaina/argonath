@@ -46,23 +46,34 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
 
   // Charger les titres automatiquement si déjà lié
   useEffect(() => {
-    if (savedPhone && step === 'verified' && accountId) {
-      setClaimsLoading(true);
-      fetchClaimsByPhone(savedPhone)
-        .then(data => {
-          setClaims(data);
-          setSearched(true);
-          // Re-autoriser on-chain les claims non encore enregistrés (créés après la vérification OTP)
-          const evmAddr = toEvmAddress(accountId);
-          const hasUnauthorized = data.some(c => !c.wallet_address);
-          if (hasUnauthorized && evmAddr) {
-            reauthorize(savedPhone, evmAddr).catch(() => {});
-          }
-        })
-        .catch(() => { setClaims([]); setSearched(true); })
-        .finally(() => setClaimsLoading(false));
-    }
+    if (!savedPhone || step !== 'verified') return;
+    setClaimsLoading(true);
+    fetchClaimsByPhone(savedPhone)
+      .then(data => {
+        setClaims(data);
+        setSearched(true);
+      })
+      .catch(() => { setClaims([]); setSearched(true); })
+      .finally(() => setClaimsLoading(false));
   }, []);
+
+  // Re-autoriser on-chain les claims non encore enregistrés dès que accountId est disponible
+  useEffect(() => {
+    if (!savedPhone || step !== 'verified' || !accountId) return;
+    const evmAddr = toEvmAddress(accountId);
+    if (!evmAddr) return;
+    fetchClaimsByPhone(savedPhone)
+      .then(data => {
+        setClaims(data);
+        const hasUnauthorized = data.some(c => !c.wallet_address);
+        if (hasUnauthorized) {
+          reauthorize(savedPhone, evmAddr)
+            .then(() => fetchClaimsByPhone(savedPhone).then(setClaims))
+            .catch(err => console.warn('[reauthorize]', err.message));
+        }
+      })
+      .catch(() => {});
+  }, [accountId]);
 
   const handleTestAuthorize = async () => {
     if (!phone) return;
