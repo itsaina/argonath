@@ -336,9 +336,13 @@ router.post('/:id/confirm-redeem', async (req, res) => {
     }
 
     // 5. Marquer comme redeemed + persister wallet_address si absent
+    //    Note : $2 = id en dernière position pour compatibilité pool.js RETURNING emulation
+    if (verifiedWallet && !claim.wallet_address) {
+      await pool.query('UPDATE claims SET wallet_address = $1 WHERE id = $2', [verifiedWallet, id]);
+    }
     const result = await pool.query(
-      `UPDATE claims SET status = 'redeemed', wallet_address = COALESCE(wallet_address, $2), updated_at = NOW() WHERE id = $1 AND status != 'redeemed' RETURNING *`,
-      [id, verifiedWallet]
+      `UPDATE claims SET status = 'redeemed', updated_at = NOW() WHERE id = $1 AND status != 'redeemed' RETURNING *`,
+      [id]
     );
     if (result.rows.length === 0) {
       return res.status(409).json({ error: 'Already redeemed' });
