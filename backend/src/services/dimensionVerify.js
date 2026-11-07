@@ -41,31 +41,34 @@ function messageFrom(data, fallback) {
 }
 
 /**
- * Le header Authorization de /v1/otp/* est déclaré comme header libre dans l'OpenAPI,
- * contrairement aux autres routes qui utilisent le schéma HTTPBearer — le format attendu
- * n'est donc pas documenté. On tente la clé brute, puis le préfixe Bearer si et seulement
- * si le service rejette l'authentification. À figer dès que le format est confirmé.
+ * Le préfixe « Bearer » est obligatoire : la clé brute est rejetée par
+ * /v1/otp/* avec « Missing or invalid Authorization header » (vérifié contre
+ * le service en production). L'OpenAPI ne le documente pas — ces routes
+ * déclarent un header libre au lieu du schéma HTTPBearer des autres routes.
  */
 async function call(path, body) {
   const { baseUrl, apiKey } = config();
-  let res, data;
-  for (const header of [apiKey, `Bearer ${apiKey}`]) {
-    res  = await fetch(`${baseUrl}${path}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Authorization: header,
-      },
-      body: JSON.stringify(body),
-    });
-    data = await res.json().catch(() => ({}));
-    if (res.status !== 401 && res.status !== 403) break;
-  }
+  const res = await fetch(`${baseUrl}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
   return { ok: res.ok, status: res.status, data };
 }
 
-/** Envoie un code OTP sur WhatsApp. Le code est généré et conservé par DimensionVerify. */
+/**
+ * Envoie un code OTP sur WhatsApp. Le code est généré et conservé par DimensionVerify.
+ *
+ * ATTENTION : la réponse du service contient le code en clair dans data.otp.
+ * On ne le retourne jamais à l'appelant et on ne le journalise jamais — sans quoi
+ * il fuiterait vers le navigateur ou les logs, ce qui viderait l'OTP de son sens.
+ * Seul l'état de remise WhatsApp est conservé, pour le diagnostic.
+ */
 async function sendOtp(phone) {
   assertE164(phone);
   const { ok, status, data } = await call('/v1/otp/send', { phone_number: phone });
@@ -76,7 +79,11 @@ async function sendOtp(phone) {
     err.status = (status === 401 || status === 403) ? 502 : status;
     throw err;
   }
-  return data;
+  // « accepted » signifie accepté par WhatsApp pour remise, pas encore remis :
+  // un numéro hors liste autorisée d'une app Meta en mode développement est
+  // accepté ici et n'arrive jamais.
+  const delivery = data?.result?.messages?.[0]?.message_status || 'unknown';
+  return { delivery };
 }
 
 /** Valide un code. Lève une erreur (status 400) si le code est incorrect ou expiré. */

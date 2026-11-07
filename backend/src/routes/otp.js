@@ -76,7 +76,10 @@ router.post('/send', async (req, res) => {
   if (!phone) return res.status(400).json({ error: 'phone required' });
 
   try {
-    await dimensionVerify.sendOtp(phone);
+    const { delivery } = await dimensionVerify.sendOtp(phone);
+    // Trace de remise uniquement — jamais le code, que DimensionVerify renvoie
+    // pourtant en clair dans sa réponse.
+    console.log(`[otp/send] ${phoneProof(phone)} — WhatsApp: ${delivery}`);
     res.json({ success: true });
   } catch (err) {
     console.error('[otp/send]', err.message);
