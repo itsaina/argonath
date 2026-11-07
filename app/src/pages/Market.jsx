@@ -13,7 +13,7 @@ import { ContractFunctionParameterBuilder } from "../services/wallets/contractFu
 import { ethers } from "ethers";
 import {
   fetchProposals, submitProposal, acceptProposal, rejectProposal, notifyHCS,
-  saveRepoOffer, fetchRepoOffers, saveRepoRequest, fetchRepoRequests,
+  saveRepoOffer, fetchRepoOffers, saveRepoRequest, fetchRepoRequests, describeError,
 } from "../services/api";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -402,8 +402,15 @@ function CreateLendingOfferSection({ accountId, walletInterface, onCreated }) {
               contractAddr: CONTRACT_ADDRESSES.RepoEscrow,
             });
           }
-        } catch {}
-        setForm({ cashMGA: '', repoRate: '8', haircut: '10', durationDays: '7' }); onCreated();
+          setForm({ cashMGA: '', repoRate: '8', haircut: '10', durationDays: '7' });
+        } catch (persistErr) {
+          // L'offre existe on-chain et les wMGA sont bloqués : ce n'est pas un échec
+          // de l'opération, mais son enregistrement a échoué. On le dit, et on garde
+          // la saisie pour que l'utilisateur ne croie pas devoir recommencer.
+          console.error('[createLendingOffer] enregistrement', persistErr);
+          setStatus('saved_partially');
+        }
+        onCreated();
       }
     } catch (err) {
       console.error(err); setStatus('error');
@@ -419,6 +426,9 @@ function CreateLendingOfferSection({ accountId, walletInterface, onCreated }) {
       {status === 'error'             && <Alert severity="error"   sx={{ mb: 2 }}>Failed — check your wMGA balance.</Alert>}
       {status === 'insufficient_cash' && <Alert severity="error"   sx={{ mb: 2 }}>Insufficient wMGA balance for this offer.</Alert>}
       {status === 'rate_zero'         && <Alert severity="error"   sx={{ mb: 2 }}>Repo rate must be greater than 0%.</Alert>}
+      {status === 'saved_partially'   && <Alert severity="warning" sx={{ mb: 2 }}>
+        Offer published on-chain — wMGA are locked — but recording it failed. Refresh to see it; contact the operator if it stays missing.
+      </Alert>}
 
       <form onSubmit={handleCreate}>
         <Stack spacing={2}>
@@ -525,12 +535,19 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
   const [loading, setLoading] = useState(false);
   const [actionId, setActionId] = useState('');
   const [fundStatus, setFundStatus] = useState('');
+  const [loadError, setLoadError] = useState('');
   const currentEvmAddr = toEvmAddress(accountId);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    setLoading(true); setLoadError('');
     try { setProposals(await fetchProposals(requestId)); }
-    catch {}
+    catch (err) {
+      // Sans ça, l'emprunteur lisait « aucune proposition » alors que la liste
+      // n'avait simplement pas pu être chargée.
+      console.error('[proposals]', err);
+      setProposals([]);
+      setLoadError(describeError(err, 'Could not load proposals.'));
+    }
     setLoading(false);
   }, [requestId]);
 
@@ -635,7 +652,13 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
         </Paper>
       )}
 
-      {pending.length === 0 && !accepted && (
+      {loadError && (
+        <Alert severity="error" sx={{ py: 0 }} action={
+          <Button color="inherit" size="small" onClick={load}>Retry</Button>
+        }>{loadError}</Alert>
+      )}
+
+      {!loadError && pending.length === 0 && !accepted && (
         <Typography variant="body2" color="#aaa">No pending proposals.</Typography>
       )}
 
@@ -988,8 +1011,14 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
               bondMaturityDate: '', contractAddr: CONTRACT_ADDRESSES.RepoEscrow,
             });
           }
-        } catch {}
-        setForm({ collateral: '', desiredMGA: '', maxRate: '8', durationDays: '7' }); onCreated();
+          setForm({ collateral: '', desiredMGA: '', maxRate: '8', durationDays: '7' });
+        } catch (persistErr) {
+          // La demande existe on-chain et l'ARGN est bloqué — voir le commentaire
+          // équivalent côté offre de prêt.
+          console.error('[createBorrowRequest] enregistrement', persistErr);
+          setStatus('saved_partially');
+        }
+        onCreated();
       }
     } catch (err) {
       console.error(err); setStatus('error');
@@ -1008,6 +1037,9 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
       {status === 'error'             && <Alert severity="error"   sx={{ mb: 2 }}>Failed — check your ARGN balance.</Alert>}
       {status === 'insufficient_argn' && <Alert severity="error"   sx={{ mb: 2 }}>Insufficient ARGN balance for this collateral.</Alert>}
       {status === 'rate_zero'         && <Alert severity="error"   sx={{ mb: 2 }}>Max rate must be greater than 0%.</Alert>}
+      {status === 'saved_partially'   && <Alert severity="warning" sx={{ mb: 2 }}>
+        Request published on-chain — ARGN are locked — but recording it failed. Refresh to see it; contact the operator if it stays missing.
+      </Alert>}
       <form onSubmit={handleCreate}>
         <Stack spacing={2}>
           <Stack direction="row" spacing={2}>
@@ -1042,58 +1074,85 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
 // PAGE MARKET — Unified list
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** Ligne de base présentée comme archivée (escrow précédent, ou lecture on-chain impossible). */
+function archivedFromRow(row) {
+  return {
+    ...row, _id: row.id, status: 99, _archived: true,
+    // Noms de champs de la base → noms on-chain, pour que l'affichage soit identique
+    lender: row.lender, cashAmount: row.cash_amount, repoRateBps: row.repo_rate_bps,
+    haircut: row.haircut_bps, durationSeconds: row.duration_sec,
+    borrower: row.borrower, collateralLocked: row.collateral_amount,
+    desiredCash: row.desired_cash, maxRateBps: row.max_rate_bps,
+  };
+}
+
+/**
+ * Construit la liste des positions d'un type donné.
+ *
+ * La chaîne est la source de vérité : on énumère toujours l'intégralité des positions
+ * on-chain. Auparavant ce balayage ne servait que de repli quand la base était vide,
+ * si bien qu'une position dont l'enregistrement avait échoué après une transaction
+ * réussie devenait invisible — alors que son collatéral était bien bloqué.
+ *
+ * La base ne sert plus qu'à deux choses : retrouver les positions d'un escrow
+ * précédent, qui ne sont plus lisibles sur l'escrow courant, et servir de repli
+ * ligne à ligne si une lecture on-chain échoue.
+ */
+async function loadPositions({ hasContracts, dbRows, countFn, readFn }) {
+  if (!hasContracts) return dbRows.map(archivedFromRow);
+
+  const currentEscrow = CONTRACT_ADDRESSES.RepoEscrow.toLowerCase();
+  const byId = new Map();
+
+  const count = Number(await countFn());
+  await Promise.all(
+    Array.from({ length: count }, async (_, i) => {
+      try {
+        byId.set(i, { ...(await readFn(i)), _id: i });
+      } catch {
+        // Lecture on-chain impossible : on reprendra la ligne de base plus bas.
+      }
+    })
+  );
+
+  for (const row of dbRows) {
+    const fromOtherEscrow =
+      row.contract_addr && row.contract_addr.toLowerCase() !== currentEscrow;
+    if (fromOtherEscrow || !byId.has(row.id)) byId.set(row.id, archivedFromRow(row));
+  }
+
+  return [...byId.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+}
+
 export default function Market() {
   const { accountId, walletInterface } = useWalletInterface();
   const [offers, setOffers] = useState([]);
   const [requests, setRequests] = useState([]);
   const [loadingOffers, setLoadingOffers] = useState(false);
   const [loadingRequests, setLoadingRequests] = useState(false);
+  // Une panne de chargement ne doit plus se présenter comme un marché vide.
+  const [loadError, setLoadError] = useState('');
   const [filterType, setFilterType] = useState('all');     // all | offers | requests
   const [filterStatus, setFilterStatus] = useState('all'); // all | open | active
   const [showCreate, setShowCreate] = useState(false);
   const hasContracts = !!CONTRACT_ADDRESSES.RepoEscrow;
 
   const loadOffers = useCallback(async () => {
-    setLoadingOffers(true);
+    setLoadingOffers(true); setLoadError('');
     try {
       const dbOffers = await fetchRepoOffers();
-      if (hasContracts && dbOffers.length > 0) {
-        const provider = getProvider();
-        const contract = new ethers.Contract(CONTRACT_ADDRESSES.RepoEscrow, REPO_ESCROW_ABI, provider);
-        const enriched = await Promise.all(dbOffers.map(async (row) => {
-          try {
-            if (row.contract_addr && row.contract_addr.toLowerCase() !== CONTRACT_ADDRESSES.RepoEscrow.toLowerCase()) {
-              return { ...row, _id: row.id, status: 99, _archived: true,
-                // Map DB field names → on-chain field names for UI compatibility
-                lender: row.lender, cashAmount: row.cash_amount, repoRateBps: row.repo_rate_bps,
-                haircut: row.haircut_bps, durationSeconds: row.duration_sec,
-                borrower: row.borrower, collateralLocked: row.collateral_amount,
-                desiredCash: row.desired_cash, maxRateBps: row.max_rate_bps };
-            }
-            const onChain = await contract.offers(row.id);
-            return { ...onChain, _id: row.id };
-          } catch {
-            return { ...row, _id: row.id, status: 99, _archived: true,
-                // Map DB field names → on-chain field names for UI compatibility
-                lender: row.lender, cashAmount: row.cash_amount, repoRateBps: row.repo_rate_bps,
-                haircut: row.haircut_bps, durationSeconds: row.duration_sec,
-                borrower: row.borrower, collateralLocked: row.collateral_amount,
-                desiredCash: row.desired_cash, maxRateBps: row.max_rate_bps };
-          }
-        }));
-        setOffers(enriched);
-      } else if (hasContracts) {
-        const provider = getProvider();
-        const contract = new ethers.Contract(CONTRACT_ADDRESSES.RepoEscrow, REPO_ESCROW_ABI, provider);
-        const count = Number(await contract.offerCount());
-        const all = await Promise.all(
-          Array.from({ length: count }, (_, i) => contract.offers(i).then(o => ({ ...o, _id: i })))
-        );
-        setOffers(all);
-      } else {
-        setOffers(dbOffers.map(r => ({ ...r, _id: r.id, status: 99, _archived: true })));
-      }
-    } catch (err) { console.error(err); }
+      const provider = hasContracts ? getProvider() : null;
+      const contract = provider && new ethers.Contract(CONTRACT_ADDRESSES.RepoEscrow, REPO_ESCROW_ABI, provider);
+      setOffers(await loadPositions({
+        hasContracts, dbRows: dbOffers,
+        countFn: () => contract.offerCount(),
+        readFn: (i) => contract.offers(i),
+      }));
+    } catch (err) {
+      console.error(err);
+      setOffers([]);
+      setLoadError(describeError(err, 'Could not load the market.'));
+    }
     setLoadingOffers(false);
   }, [hasContracts]);
 
@@ -1101,43 +1160,18 @@ export default function Market() {
     setLoadingRequests(true);
     try {
       const dbRequests = await fetchRepoRequests();
-      if (hasContracts && dbRequests.length > 0) {
-        const provider = getProvider();
-        const contract = new ethers.Contract(CONTRACT_ADDRESSES.RepoEscrow, REPO_ESCROW_ABI, provider);
-        const enriched = await Promise.all(dbRequests.map(async (row) => {
-          try {
-            if (row.contract_addr && row.contract_addr.toLowerCase() !== CONTRACT_ADDRESSES.RepoEscrow.toLowerCase()) {
-              return { ...row, _id: row.id, status: 99, _archived: true,
-                // Map DB field names → on-chain field names for UI compatibility
-                lender: row.lender, cashAmount: row.cash_amount, repoRateBps: row.repo_rate_bps,
-                haircut: row.haircut_bps, durationSeconds: row.duration_sec,
-                borrower: row.borrower, collateralLocked: row.collateral_amount,
-                desiredCash: row.desired_cash, maxRateBps: row.max_rate_bps };
-            }
-            const onChain = await contract.borrowRequests(row.id);
-            return { ...onChain, _id: row.id };
-          } catch {
-            return { ...row, _id: row.id, status: 99, _archived: true,
-                // Map DB field names → on-chain field names for UI compatibility
-                lender: row.lender, cashAmount: row.cash_amount, repoRateBps: row.repo_rate_bps,
-                haircut: row.haircut_bps, durationSeconds: row.duration_sec,
-                borrower: row.borrower, collateralLocked: row.collateral_amount,
-                desiredCash: row.desired_cash, maxRateBps: row.max_rate_bps };
-          }
-        }));
-        setRequests(enriched);
-      } else if (hasContracts) {
-        const provider = getProvider();
-        const contract = new ethers.Contract(CONTRACT_ADDRESSES.RepoEscrow, REPO_ESCROW_ABI, provider);
-        const count = Number(await contract.requestCount());
-        const all = await Promise.all(
-          Array.from({ length: count }, (_, i) => contract.borrowRequests(i).then(r => ({ ...r, _id: i })))
-        );
-        setRequests(all);
-      } else {
-        setRequests(dbRequests.map(r => ({ ...r, _id: r.id, status: 99, _archived: true })));
-      }
-    } catch (err) { console.error(err); }
+      const provider = hasContracts ? getProvider() : null;
+      const contract = provider && new ethers.Contract(CONTRACT_ADDRESSES.RepoEscrow, REPO_ESCROW_ABI, provider);
+      setRequests(await loadPositions({
+        hasContracts, dbRows: dbRequests,
+        countFn: () => contract.requestCount(),
+        readFn: (i) => contract.borrowRequests(i),
+      }));
+    } catch (err) {
+      console.error(err);
+      setRequests([]);
+      setLoadError(prev => prev || describeError(err, 'Could not load the market.'));
+    }
     setLoadingRequests(false);
   }, [hasContracts]);
 
@@ -1246,7 +1280,15 @@ export default function Market() {
       {/* Unified list */}
       {isLoading && <CircularProgress sx={{ alignSelf: 'center' }} />}
 
-      {!isLoading && allItems.length === 0 && hasContracts && (
+      {/* L'erreur passe avant le vide : sans ce garde-fou, une panne du backend
+          s'affichait comme « aucune position », ce qui est une réponse métier. */}
+      {!isLoading && loadError && (
+        <Alert severity="error" action={
+          <Button color="inherit" size="small" onClick={refresh}>Retry</Button>
+        }>{loadError}</Alert>
+      )}
+
+      {!isLoading && !loadError && allItems.length === 0 && hasContracts && (
         <Alert severity="info">No items match this filter.</Alert>
       )}
 

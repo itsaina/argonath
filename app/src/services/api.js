@@ -4,6 +4,19 @@ function getDepositaryToken() {
   return localStorage.getItem('depositary_token') || '';
 }
 
+/**
+ * Message lisible pour une erreur d'API, à afficher tel quel dans une Alert.
+ * Évite que chaque appelant réinvente la distinction entre « session expirée »,
+ * « backend injoignable » et « fonctionnalité non configurée ».
+ */
+export function describeError(err, fallback = 'Something went wrong.') {
+  if (err?.status === 401 || err?.status === 403) return 'Session expired — please sign in again.';
+  if (err?.status === 503) return 'Not configured on this deployment.';
+  // fetch rejette avec un TypeError, sans status, quand le serveur est injoignable.
+  if (err?.status === undefined && err instanceof TypeError) return 'Cannot reach the server.';
+  return err?.message || fallback;
+}
+
 async function request(path, options = {}) {
   const { headers: extraHeaders, ...restOptions } = options;
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -74,17 +87,21 @@ export const confirmRedeem = (id, txHash, walletAddress) =>
   });
 
 // Repo — persistance historique offres et demandes
+//
+// Ces quatre fonctions avalaient autrefois leurs erreurs (.catch(() => {}) et
+// .catch(() => [])). Côté lecture, une panne du backend devenait indiscernable
+// d'un marché vide ; côté écriture, l'appelant ne pouvait pas savoir qu'une
+// position créée on-chain n'avait pas été enregistrée. Les erreurs remontent
+// désormais, et c'est à l'appelant de les afficher.
 export const saveRepoOffer = (data) =>
-  request('/repo/offers', { method: 'POST', body: JSON.stringify(data) }).catch(() => {});
+  request('/repo/offers', { method: 'POST', body: JSON.stringify(data) });
 
-export const fetchRepoOffers = () =>
-  request('/repo/offers').catch(() => []);
+export const fetchRepoOffers = () => request('/repo/offers');
 
 export const saveRepoRequest = (data) =>
-  request('/repo/requests', { method: 'POST', body: JSON.stringify(data) }).catch(() => {});
+  request('/repo/requests', { method: 'POST', body: JSON.stringify(data) });
 
-export const fetchRepoRequests = () =>
-  request('/repo/requests').catch(() => []);
+export const fetchRepoRequests = () => request('/repo/requests');
 
 // Repo — propositions off-chain (côté B — Borrow Requests)
 export const fetchProposals = (requestId) =>

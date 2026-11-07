@@ -5,7 +5,7 @@ import {
 } from "@mui/material";
 import { AccountId } from "@hashgraph/sdk";
 import { useWalletInterface } from "../services/wallets/useWalletInterface";
-import { fetchClaimsByPhone, confirmRedeem, sendOtp, verifyOtp, authorizeTest, reauthorize, fetchHCSMessages } from "../services/api";
+import { fetchClaimsByPhone, confirmRedeem, sendOtp, verifyOtp, authorizeTest, reauthorize, fetchHCSMessages, describeError } from "../services/api";
 import {
   CONTRACT_ADDRESSES, CLAIM_REGISTRY_ABI, BOND_TOKEN_ABI,
   HTS_TOKEN_ID, HASHSCAN_TX_URL, EXPECTED_CHAIN_ID,
@@ -44,6 +44,8 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
   const [redeemLoading, setRedeemLoading] = useState({});
   const [redeemStatus, setRedeemStatus] = useState({});
   const [reauthorizing, setReauthorizing] = useState(false);
+  // Distingue « aucun titre pour ce numéro » (réponse métier) d'un échec de chargement.
+  const [claimsError, setClaimsError] = useState('');
 
   // Charger les titres automatiquement si déjà lié
   useEffect(() => {
@@ -54,7 +56,10 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
         setClaims(data);
         setSearched(true);
       })
-      .catch(() => { setClaims([]); setSearched(true); })
+      .catch(err => {
+        setClaims([]); setSearched(true);
+        setClaimsError(describeError(err, 'Could not load your T-Bills.'));
+      })
       .finally(() => setClaimsLoading(false));
   }, []);
 
@@ -80,6 +85,7 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
             }
           } catch (err) {
             console.warn('[reauthorize]', err.message);
+            setClaimsError('Your number could not be re-verified — please verify it again.');
             // Si reauthorize échoue (403 = aucun wallet vérifié en DB), forcer re-OTP
             if (storageKey) localStorage.removeItem(storageKey);
             setStep('phone');
@@ -89,7 +95,7 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
           }
         }
       })
-      .catch(() => {});
+      .catch(err => setClaimsError(describeError(err, 'Could not load your T-Bills.')));
   }, [accountId]);
 
   const handleTestAuthorize = async () => {
@@ -101,8 +107,11 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
       if (storageKey) localStorage.setItem(storageKey, phone);
       setStep('verified');
       setClaimsLoading(true);
-      try { setClaims(await fetchClaimsByPhone(phone)); setSearched(true); }
-      catch { setClaims([]); setSearched(true); }
+      try { setClaims(await fetchClaimsByPhone(phone)); setSearched(true); setClaimsError(''); }
+      catch (err) {
+        setClaims([]); setSearched(true);
+        setClaimsError(describeError(err, 'Could not load your T-Bills.'));
+      }
       setClaimsLoading(false);
     } catch (err) {
       setOtpError(err.message || 'Test authorization error.');
@@ -131,8 +140,11 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
       if (storageKey) localStorage.setItem(storageKey, phone);
       setStep('verified');
       setClaimsLoading(true);
-      try { setClaims(await fetchClaimsByPhone(phone)); setSearched(true); }
-      catch { setClaims([]); setSearched(true); }
+      try { setClaims(await fetchClaimsByPhone(phone)); setSearched(true); setClaimsError(''); }
+      catch (err) {
+        setClaims([]); setSearched(true);
+        setClaimsError(describeError(err, 'Could not load your T-Bills.'));
+      }
       setClaimsLoading(false);
     } catch (err) {
       setOtpError('Incorrect or expired code. Please try again.');
@@ -274,7 +286,14 @@ function ClaimsSection({ accountId, walletInterface, onRedeemed }) {
 
           {claimsLoading && <CircularProgress sx={{ alignSelf: 'flex-start' }} />}
 
-          {searched && claims.length === 0 && !claimsLoading && (
+          {/* L'erreur passe avant le vide : « aucun titre » est une réponse métier,
+              et l'afficher à la place d'une panne était le message le plus trompeur
+              de l'application. */}
+          {claimsError && !claimsLoading && (
+            <Alert severity="error">{claimsError}</Alert>
+          )}
+
+          {searched && claims.length === 0 && !claimsLoading && !claimsError && (
             <Alert severity="info">No T-Bills available for this number.</Alert>
           )}
 
@@ -424,6 +443,7 @@ const HCS_EVENT_LABELS = {
 function HistorySection({ accountId }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading]   = useState(false);
+  const [error, setError]       = useState(null);
   const evmAddr = toEvmAddress(accountId)?.toLowerCase();
 
   const load = useCallback(async () => {
@@ -432,7 +452,17 @@ function HistorySection({ accountId }) {
     try {
       const data = await fetchHCSMessages({ wallet: evmAddr, limit: 50 });
       setMessages(Array.isArray(data) ? data : []);
-    } catch {}
+      setError(null);
+    } catch (err) {
+      // Un 503 signifie « HCS non configuré » : c'est une information, pas une panne.
+      // Le signaler en rouge ferait passer un déploiement local normal pour cassé.
+      console.error('[hcs/history]', err);
+      setMessages([]);
+      setError({
+        severity: err?.status === 503 ? 'info' : 'error',
+        message: describeError(err, 'Could not load the notarial journal.'),
+      });
+    }
     setLoading(false);
   }, [evmAddr]);
 
@@ -457,7 +487,11 @@ function HistorySection({ accountId }) {
 
       {loading && <CircularProgress sx={{ alignSelf: 'center' }} />}
 
-      {!loading && messages.length === 0 && (
+      {!loading && error && (
+        <Alert severity={error.severity}>{error.message}</Alert>
+      )}
+
+      {!loading && !error && messages.length === 0 && (
         <Alert severity="info">No events recorded for your wallet.</Alert>
       )}
 

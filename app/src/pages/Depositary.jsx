@@ -9,7 +9,7 @@ import CloseIcon from "@mui/icons-material/Close";
 import AddIcon from "@mui/icons-material/Add";
 import {
   authDepositary, createClaim, fetchAllClaims, updateClaimStatus,
-  fetchHCSMessagesDepositary,
+  fetchHCSMessagesDepositary, describeError,
 } from "../services/api";
 
 const STATUS_COLORS = {
@@ -77,8 +77,10 @@ function PasswordGate({ onAuth, expired }) {
       const res = await authDepositary(pwd);
       localStorage.setItem('depositary_token', res.token);
       onAuth();
-    } catch {
-      setError('Incorrect password.');
+    } catch (err) {
+      setError(err?.status === 401
+        ? 'Incorrect password.'
+        : describeError(err, 'Could not sign in.'));
     } finally {
       setLoading(false);
     }
@@ -346,22 +348,31 @@ export default function Depositary() {
   const [form, setForm]             = useState(EMPTY_FORM);
   const [formLoading, setFormLoading] = useState(false);
   const [formError, setFormError]   = useState('');
+  // Erreurs de page (chargement, changement de statut) — distinctes du formulaire.
+  const [actionError, setActionError] = useState('');
   const [tab, setTab]               = useState(0);
 
+  /**
+   * Une session refusée renvoie au formulaire. Sans ça, l'opérateur restait sur une
+   * interface vide et silencieuse et croyait qu'il n'y avait aucune allocation.
+   * Retourne true si l'erreur a été traitée comme une expiration de session.
+   */
+  const handleAuthError = (err) => {
+    if (err?.status !== 401 && err?.status !== 403) return false;
+    localStorage.removeItem('depositary_token');
+    setExpired(true);
+    setAuthed(false);
+    return true;
+  };
+
   const loadClaims = async () => {
-    setLoading(true);
+    setLoading(true); setActionError('');
     try {
       setClaims(await fetchAllClaims());
     } catch (err) {
       setClaims([]);
-      // Le jeton stocké est le mot de passe lui-même : il devient invalide dès
-      // qu'on change de mot de passe ou de backend. Sans ça, l'opérateur reste
-      // sur une interface vide et silencieuse, et croit qu'il n'y a aucune
-      // allocation.
-      if (err?.status === 401 || err?.status === 403) {
-        localStorage.removeItem('depositary_token');
-        setExpired(true);
-        setAuthed(false);
+      if (!handleAuthError(err)) {
+        setActionError(describeError(err, 'Could not load allocations.'));
       }
     }
     setLoading(false);
@@ -397,7 +408,19 @@ export default function Depositary() {
   };
 
   const handleStatusChange = async (id, status) => {
-    try { await updateClaimStatus(id, status); loadClaims(); } catch { /* silently retry */ }
+    setActionError('');
+    try {
+      await updateClaimStatus(id, status);
+      loadClaims();
+    } catch (err) {
+      // Le commentaire précédent annonçait une nouvelle tentative qui n'existait pas :
+      // le statut paraissait changé à l'écran alors que rien n'était persisté.
+      console.error('[claims/status]', err);
+      if (!handleAuthError(err)) {
+        setActionError(describeError(err, 'Could not change the status.'));
+      }
+      loadClaims();   // remet la ligne sur la valeur réellement enregistrée
+    }
   };
 
   return (
@@ -421,6 +444,10 @@ export default function Depositary() {
           </Stack>
         )}
       </Stack>
+
+      {actionError && (
+        <Alert severity="error" onClose={() => setActionError('')}>{actionError}</Alert>
+      )}
 
       {/* Tabs */}
       <Tabs value={tab} onChange={(_, v) => setTab(v)}
@@ -516,8 +543,11 @@ export default function Depositary() {
                 </Select>
               </FormControl>
               <Stack direction="row" spacing={2}>
+                {/* step explicite : sans lui HTML5 retombe sur 1 et rejette tout montant
+                    décimal, à la soumission, sans autre signal qu'une bulle du navigateur. */}
                 <TextField name="nominal_amount" label="Nominal amount (MGA)" type="number" value={form.nominal_amount}
-                  onChange={handleFormChange} fullWidth required InputProps={{ inputProps: { min: 0 } }} />
+                  onChange={handleFormChange} fullWidth required
+                  InputProps={{ inputProps: { min: 0, step: '0.01' } }} />
                 <TextField name="rate" label="Rate (%)" type="number" value={form.rate}
                   onChange={handleFormChange} fullWidth required
                   InputProps={{ endAdornment: <InputAdornment position="end">%</InputAdornment>, inputProps: { step: '0.01', min: 0 } }}

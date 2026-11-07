@@ -26,6 +26,8 @@ function FaucetSection({ accountId, walletInterface }) {
   const [loading, setLoading] = useState(false);
   const [status, setStatus]   = useState('');
   const [balance, setBalance] = useState(null);
+  // Un solde illisible ne doit pas ressembler a un solde nul.
+  const [balanceError, setBalanceError] = useState(false);
   const [txHash, setTxHash]   = useState('');
   const evmAddr = toEvmAddress(accountId);
 
@@ -35,7 +37,12 @@ function FaucetSection({ accountId, walletInterface }) {
       const contract = new ethers.Contract(CONTRACT_ADDRESSES.MockCash, MOCK_CASH_ABI, getProvider());
       const bal = await contract.balanceOf(evmAddr);
       setBalance((Number(bal) / 1e6).toLocaleString('en-US', { minimumFractionDigits: 2 }));
-    } catch {}
+      setBalanceError(false);
+    } catch (err) {
+      console.error('[faucet/balance]', err);
+      setBalance(null);
+      setBalanceError(true);
+    }
   }, [evmAddr]);
 
   useEffect(() => { loadBalance(); }, [loadBalance]);
@@ -71,6 +78,9 @@ function FaucetSection({ accountId, walletInterface }) {
       <Stack spacing={2}>
         <Stack direction="row" alignItems="center" spacing={1}>
           <Typography variant="h6" fontWeight={700} color="#1565c0">💧 wMGA Faucet</Typography>
+          {balanceError && (
+            <Chip label="Balance unavailable" size="small" sx={{ bgcolor: '#fdecea', color: '#b71c1c', fontWeight: 600 }} />
+          )}
           {balance !== null && (
             <Chip label={`Balance: ${balance} wMGA`} size="small" sx={{ bgcolor: '#e3f2fd', color: '#1565c0', fontWeight: 600 }} />
           )}
@@ -82,11 +92,14 @@ function FaucetSection({ accountId, walletInterface }) {
         </Typography>
         {!accountId && <Alert severity="info" sx={{ py: 0 }}>Connect your wallet to use the faucet.</Alert>}
         <Stack direction="row" spacing={1} alignItems="center">
+          {/* step: 1000 avec min: 1 ne rendait valides que 1, 1001, 2001… — la valeur par
+              défaut 10000 était elle-même invalide. 'any' car le wMGA a 6 décimales et
+              parseUnits les accepte : rien ici ne justifie de contraindre la finesse. */}
           <TextField
             size="small" type="number" label="Amount (MGA)" value={amount}
             onChange={e => setAmount(e.target.value)}
             sx={{ width: 200 }}
-            inputProps={{ min: 1, step: 1000 }}
+            inputProps={{ min: 1, step: 'any' }}
           />
           <Button variant="contained" size="small" disabled={loading || !accountId}
             onClick={handleMint}
