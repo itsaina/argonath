@@ -19,7 +19,6 @@
     "@walletconnect/web3wallet": "^1.16.1",
     "assert": "^2.1.0",
     "buffer": "^6.0.3",
-    "cra-hedera-dapp-template-js": "file:../Argonath V3",
     "crypto-browserify": "^3.12.1",
     "dotenv": "^16.1.3",
     "ethers": "^5.7.2",

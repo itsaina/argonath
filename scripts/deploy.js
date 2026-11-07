@@ -41,27 +41,46 @@ async function main() {
   await claimRegistry.waitForDeployment();
   console.log("ClaimRegistry:", await claimRegistry.getAddress());
 
-  // 3. RepoEscrow (utilise MockCash pour le collatéral cash)
+  // 3. BondMetadata (registre des maturités, lu par RepoEscrow)
+  const BondMetadata = await ethers.getContractFactory("BondMetadata");
+  const bondMetadata = await BondMetadata.deploy(TX_OPTS);
+  await bondMetadata.waitForDeployment();
+  const bondMetadataAddr = await bondMetadata.getAddress();
+  console.log("BondMetadata :", bondMetadataAddr);
+
+  // 4. RepoEscrow (utilise MockCash pour le collatéral cash)
   const RepoEscrow = await ethers.getContractFactory("RepoEscrow");
   const repoEscrow = await RepoEscrow.deploy(
     deployer.address,          // placeholder pour BondToken (sera remplacé par HTS)
     await mockCash.getAddress(),
+    bondMetadataAddr,
     TX_OPTS_LARGE
   );
   await repoEscrow.waitForDeployment();
   console.log("RepoEscrow   :", await repoEscrow.getAddress());
 
-  // 4. Mint des wMGA de test
+  // 5. RepoReceiptNFT (ERC-721 lié à RepoEscrow)
+  const RepoReceiptNFT = await ethers.getContractFactory("RepoReceiptNFT");
+  const repoReceipt = await RepoReceiptNFT.deploy(await repoEscrow.getAddress(), TX_OPTS);
+  await repoReceipt.waitForDeployment();
+  let repoReceiptAddr = await repoReceipt.getAddress();
+  console.log("RepoReceipt  :", repoReceiptAddr);
+  await (await repoEscrow.setRepoReceipt(repoReceiptAddr, TX_OPTS)).wait();
+  console.log("  -> RepoReceipt lié à RepoEscrow");
+
+  // 6. Mint des wMGA de test
   await mockCash.mint(deployer.address, ethers.parseUnits("1000000", 6), TX_OPTS);
   console.log("Minted 1M wMGA au deployer");
 
   const addresses = {
-    MockCash:      await mockCash.getAddress(),
-    ClaimRegistry: await claimRegistry.getAddress(),
-    RepoEscrow:    await repoEscrow.getAddress(),
+    MockCash:       await mockCash.getAddress(),
+    ClaimRegistry:  await claimRegistry.getAddress(),
+    BondMetadata:   bondMetadataAddr,
+    RepoEscrow:     await repoEscrow.getAddress(),
+    RepoReceiptNFT: repoReceiptAddr,
   };
 
-  // 5. Créer le token HTS ARGN sur Hedera testnet
+  // 7. Créer le token HTS ARGN sur Hedera testnet
   let htsTokenId  = '';
   let htsEvmAddr  = '';
 
@@ -74,21 +93,32 @@ async function main() {
     console.log("HTS EVM addr :", htsEvmAddr);
     console.log("HashScan     : https://hashscan.io/testnet/token/" + htsTokenId);
 
-    // 5b. Redéployer RepoEscrow avec le vrai bondToken HTS (fix placeholder)
+    // 7b. Redéployer RepoEscrow avec le vrai bondToken HTS (fix placeholder)
     console.log("\nRedéploiement de RepoEscrow avec bondToken HTS...");
     const RepoEscrow2 = await ethers.getContractFactory("RepoEscrow");
-    const repoEscrow2 = await RepoEscrow2.deploy(htsEvmAddr, await mockCash.getAddress(), TX_OPTS_LARGE);
+    const repoEscrow2 = await RepoEscrow2.deploy(htsEvmAddr, await mockCash.getAddress(), bondMetadataAddr, TX_OPTS_LARGE);
     await repoEscrow2.waitForDeployment();
     addresses.RepoEscrow = await repoEscrow2.getAddress();
     console.log("RepoEscrow (v2):", addresses.RepoEscrow);
+
+    // 7c. RepoReceiptNFT doit pointer vers le nouveau RepoEscrow
+    const RepoReceiptNFT2 = await ethers.getContractFactory("RepoReceiptNFT");
+    const repoReceipt2 = await RepoReceiptNFT2.deploy(addresses.RepoEscrow, TX_OPTS);
+    await repoReceipt2.waitForDeployment();
+    repoReceiptAddr = await repoReceipt2.getAddress();
+    addresses.RepoReceiptNFT = repoReceiptAddr;
+    await (await repoEscrow2.setRepoReceipt(repoReceiptAddr, TX_OPTS)).wait();
+    console.log("RepoReceipt (v2):", repoReceiptAddr);
   }
 
-  // 6. Met à jour app/.env
+  // 8. Met à jour app/.env
   const appEnv = {
     REACT_APP_MOCK_CASH_ADDRESS:      addresses.MockCash,
     REACT_APP_CLAIM_REGISTRY_ADDRESS: addresses.ClaimRegistry,
     REACT_APP_BOND_TOKEN_ADDRESS:     htsEvmAddr || addresses.MockCash, // HTS EVM addr pour balanceOf
     REACT_APP_REPO_ESCROW_ADDRESS:    addresses.RepoEscrow,
+    REACT_APP_BOND_METADATA_ADDRESS:  addresses.BondMetadata,
+    REACT_APP_REPO_RECEIPT_ADDRESS:   addresses.RepoReceiptNFT,
     REACT_APP_RPC_URL:                rpcUrl,
     REACT_APP_CHAIN_ID:               isHedera ? '0x128' : '0x7a69',
     REACT_APP_HASHSCAN_URL:           isHedera ? 'https://hashscan.io/testnet/transaction/' : '',
@@ -96,9 +126,10 @@ async function main() {
   if (htsTokenId) appEnv.REACT_APP_HTS_TOKEN_ID = htsTokenId;
   updateEnv(path.join(__dirname, "../app/.env"), appEnv);
 
-  // 7. Met à jour backend/.env
+  // 9. Met à jour backend/.env
   const backendEnv = {
     CLAIM_REGISTRY_ADDRESS: addresses.ClaimRegistry,
+    BOND_METADATA_ADDRESS:  addresses.BondMetadata,
     RPC_URL: rpcUrl,
   };
   if (isHedera && process.env.HEDERA_PRIVATE_KEY) {
