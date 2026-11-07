@@ -113,6 +113,13 @@ function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
   const lenderAddr = offer.lender?.toLowerCase();
   const borrowerAddr = offer.borrower?.toLowerCase();
 
+  // Ces deux const étaient déclarées APRÈS isDefaultable et isInMarginGrace, qui les
+  // lisent : zone morte temporelle. L'erreur restait invisible parce que && court-circuite
+  // — elle ne se déclenchait que sur une offre au statut MarginCalled, dont la carte
+  // plantait alors sur « Cannot access 'isLender' before initialization ».
+  const isLender = evmAccount && evmAccount === lenderAddr;
+  const isBorrower = evmAccount && evmAccount === borrowerAddr;
+
   const maturityDate = Number(offer.maturity) > 0 ? new Date(Number(offer.maturity) * 1000) : null;
   // Le lender peut trigger le margin call dès que le repo est matured (statut Active)
   const canTriggerMarginCall = statusLabel === 'Active' && maturityDate && Date.now() >= maturityDate.getTime();
@@ -120,8 +127,6 @@ function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
   const isDefaultable = statusLabel === 'MarginCalled' && isLender;
   // Alerte margin call active pour l'emprunteur
   const isInMarginGrace = statusLabel === 'MarginCalled' && isBorrower;
-  const isLender = evmAccount && evmAccount === lenderAddr;
-  const isBorrower = evmAccount && evmAccount === borrowerAddr;
 
   const haircut = Number(offer.haircut);
   const cashAmt = Number(offer.cashAmount);
