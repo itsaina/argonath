@@ -1,25 +1,16 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const { ethers } = require('ethers');
 const pool = require('../db/pool');
 const { publishEvent, phoneProof } = require('../services/hcs');
 const { normalizePhone } = require('../utils/phone');
-
-const VERIFYWAY_URL = 'https://api.verifyway.com/api/v1/';
-const VERIFYWAY_KEY = process.env.VERIFYWAY_API_KEY;
+const dimensionVerify = require('../services/dimensionVerify');
 
 // ABI minimal ClaimRegistry — uniquement la fonction authorize
 const CLAIM_REGISTRY_ABI = [
   'function authorize(bytes32 claimId, address wallet) external',
 ];
-
-// Stockage en mémoire : phone → { code, expiresAt }
-const pendingOtps = new Map();
-const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
-
-function generateCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
 
 /** Retourne un wallet signeur (deployer local ou clé configurée) */
 function getAdminWallet() {
@@ -84,38 +75,12 @@ router.post('/send', async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   if (!phone) return res.status(400).json({ error: 'phone required' });
 
-  const code = generateCode();
-  pendingOtps.set(phone, { code, expiresAt: Date.now() + OTP_TTL_MS });
-
   try {
-    const response = await fetch(VERIFYWAY_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${VERIFYWAY_KEY}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        recipient: phone,
-        type: 'otp',
-        code,
-        channel: 'whatsapp',
-        fallback: 'no',
-        lang: 'en',
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok || data.error) {
-      pendingOtps.delete(phone);
-      return res.status(502).json({ error: data.error || 'Verifyway error' });
-    }
-
+    await dimensionVerify.sendOtp(phone);
     res.json({ success: true });
   } catch (err) {
-    pendingOtps.delete(phone);
-    console.error('OTP send error:', err.message);
-    res.status(502).json({ error: 'Failed to reach Verifyway' });
+    console.error('[otp/send]', err.message);
+    res.status(err.status || 502).json({ error: err.message });
   }
 });
 
@@ -129,19 +94,13 @@ router.post('/verify', async (req, res) => {
   const { code, walletAddress } = req.body;
   if (!phone || !code) return res.status(400).json({ error: 'phone and code required' });
 
-  const entry = pendingOtps.get(phone);
-  if (!entry) return res.status(400).json({ error: 'Aucun OTP en attente pour ce numéro.' });
-
-  if (Date.now() > entry.expiresAt) {
-    pendingOtps.delete(phone);
-    return res.status(400).json({ error: 'Code expiré. Veuillez en demander un nouveau.' });
+  // La validité du code est tranchée par DimensionVerify (génération + stockage Redis).
+  try {
+    await dimensionVerify.verifyOtp(phone, code);
+  } catch (err) {
+    console.error('[otp/verify]', err.message);
+    return res.status(err.status || 400).json({ error: err.message });
   }
-
-  if (String(code) !== entry.code) {
-    return res.status(400).json({ error: 'Code incorrect.' });
-  }
-
-  pendingOtps.delete(phone);
 
   // Autorise on-chain si un wallet est fourni — await pour garantir que la tx est minée
   if (walletAddress && ethers.isAddress(walletAddress)) {
@@ -219,6 +178,55 @@ router.post('/reauthorize', async (req, res) => {
     console.error('[reauthorize] error:', err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+/**
+ * POST /api/otp/webhook
+ * Réception des événements DimensionVerify (otp envoyé / vérifié / échec, quota bas).
+ *
+ * Purement observationnel : le parcours investisseur est synchrone et ne dépend
+ * pas de cette route. Elle sert à tracer les envois et surtout à alerter avant
+ * que le quota de crédits ne tombe à zéro et casse silencieusement l'OTP.
+ *
+ * Signature : HMAC-SHA256 du corps brut, en-tête X-Webhook-Signature.
+ * Le secret est optionnel côté DimensionVerify ; s'il est configuré ici, toute
+ * requête non signée ou mal signée est rejetée.
+ */
+router.post('/webhook', (req, res) => {
+  const secret = process.env.DIMENSION_VERIFY_WEBHOOK_SECRET;
+
+  if (secret) {
+    const received = String(req.get('X-Webhook-Signature') || '').replace(/^sha256=/i, '').trim();
+    if (!received || !req.rawBody) {
+      return res.status(401).json({ error: 'Missing signature' });
+    }
+    const digest = crypto.createHmac('sha256', secret).update(req.rawBody).digest();
+    // Le format d'encodage n'est pas documenté : on accepte hex et base64.
+    const expected = [digest.toString('hex'), digest.toString('base64')];
+    const ok = expected.some(exp => {
+      const a = Buffer.from(exp);
+      const b = Buffer.from(received);
+      return a.length === b.length && crypto.timingSafeEqual(a, b);
+    });
+    if (!ok) {
+      console.warn('[otp/webhook] signature invalide — requête rejetée');
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+  } else {
+    console.warn('[otp/webhook] DIMENSION_VERIFY_WEBHOOK_SECRET non configurée — signature non vérifiée');
+  }
+
+  const body  = req.body || {};
+  const event = body.event || body.type || 'unknown';
+  console.log(`[otp/webhook] ${event}`, JSON.stringify(body.data || body));
+
+  // Alerte quota : seul événement qui demande une action humaine.
+  if (/quota/i.test(event)) {
+    console.error(`[otp/webhook] QUOTA DIMENSIONVERIFY BAS — recharger des crédits. ${JSON.stringify(body.data || body)}`);
+  }
+
+  // Toujours 200 : un non-2xx déclencherait des retentatives côté DimensionVerify.
+  res.json({ received: true });
 });
 
 module.exports = router;

@@ -47,7 +47,7 @@ Argonath V3/
 | Token standard | ERC-20 (0 decimals) + HTS via HIP-218 |
 | Notarization | Hedera Consensus Service (HCS) — immutable off-chain proofs |
 | Backend | Node.js 20, Express 4, SQLite (better-sqlite3) — persistent on Railway via volume `/data` |
-| Investor auth | WhatsApp OTP via Verifyway API |
+| Investor auth | WhatsApp OTP via DimensionVerify API |
 | Frontend | React 18, Create React App + CRACO, MUI v5, ethers v5 |
 | Wallets | MetaMask (window.ethereum) + WalletConnect / Hedera Wallet Connect |
 | Deployment | Railway (backend + frontend as separate services) |
@@ -102,7 +102,7 @@ ERC-20 with 6 decimals simulating wMGA (tokenized Malagasy ariary). Freely minta
 - npm >= 9
 - Hedera testnet account with HBAR (get some at [portal.hedera.com](https://portal.hedera.com/))
 - Railway account (deployment)
-- Verifyway API key (WhatsApp OTP)
+- DimensionVerify API key (WhatsApp OTP) — generated from the DimensionVerify dashboard
 
 ---
 
@@ -148,8 +148,9 @@ HCS_TOPIC_ID=0.0.XXXXX
 # HTS
 HTS_TOKEN_ID=0.0.XXXXX
 
-# WhatsApp OTP (Verifyway)
-VERIFYWAY_API_KEY=...
+# WhatsApp OTP (DimensionVerify)
+DIMENSION_VERIFY_URL=https://backend-production-ed52.up.railway.app
+DIMENSION_VERIFY_API_KEY=dv_...
 
 # CORS
 FRONTEND_URL=https://your-frontend.railway.app
@@ -321,7 +322,7 @@ Set all variables from `app/.env` in the Railway service environment.
 
 ### Investor — Redeem a T-Bill
 1. Connect wallet (MetaMask or WalletConnect)
-2. Verify identity via WhatsApp OTP (Verifyway) → backend authorizes the wallet on-chain via `ClaimRegistry.authorize()`
+2. Verify identity via WhatsApp OTP (DimensionVerify generates, sends and validates the code) → backend authorizes the wallet on-chain via `ClaimRegistry.authorize()`
 3. Investor calls `ClaimRegistry.redeem()` on-chain
 4. Backend listens for the `ClaimRedeemed` event and mints HTS ARGN tokens
 5. ARGN tokens appear in the wallet

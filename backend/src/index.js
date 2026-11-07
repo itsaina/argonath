@@ -19,7 +19,11 @@ app.use(cors({
     cb(new Error('Not allowed by CORS'));
   },
 }));
-app.use(express.json());
+// rawBody est conservé pour la vérification HMAC des webhooks (signature calculée
+// sur les octets exacts reçus — un JSON re-sérialisé ne donnerait pas le même hash).
+app.use(express.json({
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/claims', claimsRoutes);

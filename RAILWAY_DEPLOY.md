@@ -130,7 +130,7 @@ const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:3000')
 
 **Solution :** toujours utiliser des guillemets **simples** pour les valeurs avec caractères spéciaux :
 ```bash
-railway variables set 'VERIFYWAY_API_KEY=1803$gBWA...' --service argonath
+railway variables set 'DIMENSION_VERIFY_API_KEY=dv_...' --service argonath
 ```
 
 ---
