@@ -21,8 +21,9 @@ app/build/
 artifacts/
 cache/
 
-# Claude AI context
+# Outillage agents (contexte local, pas du code du projet)
 .claude/
+.serena/
 
 # SQLite database et logs
 *.db
