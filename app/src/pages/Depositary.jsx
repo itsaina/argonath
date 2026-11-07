@@ -65,9 +65,9 @@ function HcsEventChip({ event }) {
 }
 
 // ─── Password Gate ─────────────────────────────────────────────────────────────
-function PasswordGate({ onAuth }) {
+function PasswordGate({ onAuth, expired }) {
   const [pwd, setPwd] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState(expired ? 'Session expired — please sign in again.' : '');
   const [loading, setLoading] = useState(false);
 
   const submit = async (e) => {
@@ -338,6 +338,7 @@ function ProofVerifier() {
 // ─── Main Depositary Page ──────────────────────────────────────────────────────
 export default function Depositary() {
   const [authed, setAuthed]         = useState(!!localStorage.getItem('depositary_token'));
+  const [expired, setExpired]       = useState(false);
   const [claims, setClaims]         = useState([]);
   const [loading, setLoading]       = useState(false);
   const [filterStatus, setFilterStatus] = useState('all');
@@ -349,13 +350,33 @@ export default function Depositary() {
 
   const loadClaims = async () => {
     setLoading(true);
-    try { setClaims(await fetchAllClaims()); } catch { setClaims([]); }
+    try {
+      setClaims(await fetchAllClaims());
+    } catch (err) {
+      setClaims([]);
+      // Le jeton stocké est le mot de passe lui-même : il devient invalide dès
+      // qu'on change de mot de passe ou de backend. Sans ça, l'opérateur reste
+      // sur une interface vide et silencieuse, et croit qu'il n'y a aucune
+      // allocation.
+      if (err?.status === 401 || err?.status === 403) {
+        localStorage.removeItem('depositary_token');
+        setExpired(true);
+        setAuthed(false);
+      }
+    }
     setLoading(false);
   };
 
   useEffect(() => { if (authed) loadClaims(); }, [authed]);
 
-  if (!authed) return <PasswordGate onAuth={() => setAuthed(true)} />;
+  if (!authed) {
+    return (
+      <PasswordGate
+        expired={expired}
+        onAuth={() => { setExpired(false); setAuthed(true); }}
+      />
+    );
+  }
 
   const filtered = filterStatus === 'all' ? claims : claims.filter(c => c.status === filterStatus);
 

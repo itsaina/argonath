@@ -10,8 +10,15 @@ async function request(path, options = {}) {
     ...restOptions,
     headers: { 'Content-Type': 'application/json', ...extraHeaders },
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    // Le code HTTP est porté par l'erreur : l'appelant doit pouvoir distinguer
+    // un jeton refusé (401) d'une panne, pour invalider la session plutôt que
+    // d'afficher une interface vide.
+    const err = new Error(data.error || 'Request failed');
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 

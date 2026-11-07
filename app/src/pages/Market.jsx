@@ -435,7 +435,7 @@ function CreateLendingOfferSection({ accountId, walletInterface, onCreated }) {
           <Stack direction="row" spacing={2}>
             <TextField name="repoRate" label="Repo rate (%/yr)" type="number"
               value={form.repoRate} onChange={handleChange} fullWidth disabled={!hasContracts}
-              InputProps={{ inputProps: { min: 0.01, step: '0.1' } }} />
+              InputProps={{ inputProps: { min: 0.01, step: '0.01' } }} />
             <TextField name="durationDays" label="Duration (days)" type="number"
               value={form.durationDays} onChange={handleChange} fullWidth disabled={!hasContracts}
               InputProps={{ inputProps: { min: 1 } }} />
@@ -1022,7 +1022,7 @@ function CreateBorrowRequestSection({ accountId, walletInterface, onCreated }) {
           <Stack direction="row" spacing={2}>
             <TextField name="maxRate" label="Max rate accepted (%/yr)" type="number"
               value={form.maxRate} onChange={handleChange} fullWidth disabled={!hasContracts}
-              InputProps={{ inputProps: { min: 0.01, step: '0.1' } }} />
+              InputProps={{ inputProps: { min: 0.01, step: '0.01' } }} />
             <TextField name="durationDays" label="Duration (days)" type="number"
               value={form.durationDays} onChange={handleChange} fullWidth disabled={!hasContracts}
               InputProps={{ inputProps: { min: 1 } }} />
