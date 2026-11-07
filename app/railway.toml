@@ -1,9 +1,14 @@
-[build]
-builder = "NIXPACKS"
-buildCommand = "npm install && npm run build"
+# Railway construit ce service avec Railpack, qui IGNORE `builder` et `startCommand`.
+# Les déclarer ici donnait l'illusion qu'ils s'appliquaient : le conteneur lançait en
+# réalité `npm start`, donc le serveur de développement CRA, qui sert un bundle de
+# développement et plante au chargement.
+#
+# La commande de démarrage se règle sur le service :
+#   Railway → service → Settings → Deploy → Custom Start Command
+#   npx serve -s build --listen $PORT
+# Le flag `-s` est indispensable : sans lui, toute route React autre que `/` renvoie 404.
 
 [deploy]
-startCommand = "npx serve -s build --listen $PORT"
 healthcheckPath = "/"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"

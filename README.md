@@ -13,7 +13,7 @@ Argonath V3/
 │   ├── BondToken.sol       — ARGN token (ERC-20, 0 decimals, HTS-compatible)
 │   ├── BondMetadata.sol    — on-chain bond maturity registry per wallet
 │   ├── RepoEscrow.sol      — bilateral repo escrow (Mode A + Mode B)
-│   ├── RepoReceiptNFT.sol  — ERC-721 proof of collateral ownership (minted to lender)
+│   ├── RepoReceiptNFT.sol  — non-transferable collateral receipt (minted to lender)
 │   └── MockCash.sol        — wMGA stablecoin mock (testing / PoC)
 ├── scripts/            # Hardhat deployment scripts
 │   ├── deploy.js           — deploys all contracts + updates .env files
@@ -82,7 +82,17 @@ Open → Active → MarginCalled → Repaid
 Interest calculation: **ACT/365** — `cashAmount × rateBps × durationSeconds / (10000 × 31536000)`
 
 ### RepoReceiptNFT (REPO-RCT)
-ERC-721 minted to the lender when funding a Borrow Request. Acts as proof of ownership of the collateral held in escrow (tri-party repo model).
+Minted to the lender when funding a Borrow Request, as proof that the escrow holds their collateral.
+
+**Not an ERC-721**, despite the name. It is a hand-rolled mint/burn record with an
+ERC-721-like storage layout: no `transferFrom`, no `approve`, no ERC-165, no `tokenURI`,
+and `ownerOf` is a public mapping returning `address(0)` for an unknown id where ERC-721
+requires a revert. OpenZeppelin is avoided on purpose — its `mcopy` usage is incompatible
+with the Hedera Paris EVM target.
+
+The consequence is worth stating: **the receipt cannot be sold, assigned or pledged.**
+The lender has exactly two exits — repayment or a default claim — so this falls short of
+the transferable title a tri-party repo model would normally imply.
 
 **Lifecycle:**
 - **Minted** at `fundRequest()` — lender receives NFT with on-chain metadata (requestId, collateral amount, borrower, cash, rate, maturity)
@@ -168,7 +178,7 @@ REACT_APP_CLAIM_REGISTRY_ADDRESS=0x...
 REACT_APP_BOND_TOKEN_ADDRESS=0x...      # EVM address of the HTS token (via HIP-218)
 REACT_APP_REPO_ESCROW_ADDRESS=0x...
 REACT_APP_BOND_METADATA_ADDRESS=0x...
-REACT_APP_REPO_RECEIPT_ADDRESS=0x...        # RepoReceiptNFT (ERC-721)
+REACT_APP_REPO_RECEIPT_ADDRESS=0x...        # RepoReceiptNFT (non-transferable receipt)
 REACT_APP_HTS_TOKEN_ID=0.0.XXXXX
 REACT_APP_RPC_URL=https://testnet.hashio.io/api
 REACT_APP_CHAIN_ID=0x128                # 0x128 = Hedera testnet | 0x7a69 = Hardhat local
@@ -189,10 +199,20 @@ npx hardhat node
 ### 2. Deploy contracts (local)
 
 ```bash
-npx hardhat run scripts/deploy.js --network localhost
+npx hardhat run scripts/deploy-local.js --network localhost
+
+# Optional: fund a MetaMask wallet with gas, wMGA, ARGN and a bond maturity
+FUND=0xYourWallet npx hardhat run scripts/deploy-local.js --network localhost
 ```
 
-The script automatically updates `app/.env` and `backend/.env` with the deployed contract addresses.
+The script updates `app/.env` and `backend/.env` with the deployed addresses.
+
+> Use `deploy-local.js`, **not** `deploy.js`, on a local chain. `deploy.js` targets Hedera,
+> where ARGN is an HTS token minted by the backend; off Hedera it passes the deployer's own
+> address as `RepoEscrow`'s `_bondToken`, so every collateral transfer reverts and no repo
+> flow can be exercised. `ClaimRegistry` never calls `BondToken.mint` either, so nothing can
+> create ARGN locally. `deploy-local.js` deploys a real `BondToken` whose registry is the
+> backend admin, standing in for the HTS mint.
 
 ### 3. Start the backend
 

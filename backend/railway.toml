@@ -1,8 +1,12 @@
-[build]
-builder = "NIXPACKS"
+# Railway construit ce service avec Railpack, qui IGNORE `builder` et `startCommand`.
+# Railpack détecte Node et lance `npm start`, ce qui convient ici — mais ne comptez pas
+# sur ce fichier pour l'imposer. Si la commande doit changer, réglez-la sur le service :
+#   Railway → service → Settings → Deploy → Custom Start Command
+#
+# La base SQLite n'est persistante que si un volume est monté sur /data : voir
+# backend/src/db/pool.js, qui bascule sur un fichier local quand /data n'existe pas.
 
 [deploy]
-startCommand = "npm start"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"

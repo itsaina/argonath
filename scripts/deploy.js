@@ -59,7 +59,7 @@ async function main() {
   await repoEscrow.waitForDeployment();
   console.log("RepoEscrow   :", await repoEscrow.getAddress());
 
-  // 5. RepoReceiptNFT (ERC-721 lié à RepoEscrow)
+  // 5. RepoReceiptNFT — reçu non transférable lié à RepoEscrow (pas un ERC-721)
   const RepoReceiptNFT = await ethers.getContractFactory("RepoReceiptNFT");
   const repoReceipt = await RepoReceiptNFT.deploy(await repoEscrow.getAddress(), TX_OPTS);
   await repoReceipt.waitForDeployment();

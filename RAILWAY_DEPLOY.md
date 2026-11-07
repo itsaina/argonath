@@ -64,17 +64,29 @@ legacy-peer-deps=true
 
 **Cause :** il faut un serveur statique qui redirige tout vers `index.html`.
 
-**Solution :** `app/railway.toml`
-```toml
-[build]
-builder = "NIXPACKS"
-buildCommand = "npm install && npm run build"
+**Solution :** régler la commande de démarrage **sur le service**, pas dans `railway.toml`.
 
-[deploy]
-startCommand = "npx serve -s build --listen $PORT"
-```
+Railway construit avec **Railpack**, qui ignore `builder` et `startCommand` du
+`railway.toml`. Tant qu'on croit le contraire, Railpack lance `npm start` — donc le
+serveur de développement CRA : la page est blanche et la console affiche
+`React Refresh runtime should not be included in the production bundle`. Le build de
+production, lui, est correct ; c'est l'exécution qui ne l'est pas.
 
-> Le flag `-s` (single-page app mode) est indispensable.
+> Railway → service → **Settings → Deploy → Custom Start Command**
+> ```
+> npx serve -s build --listen $PORT
+> ```
+
+> Le flag `-s` (single-page app mode) est indispensable : sans lui, toute route React
+> autre que `/` renvoie 404.
+
+Deux pièges au moment de corriger :
+
+- `railway redeploy` **réutilise l'image existante** et ne reconstruit rien. Après un
+  changement de commande de démarrage, relancez un `railway up` complet.
+- Pour vérifier ce qui est réellement servi, demandez `/asset-manifest.json` : un build
+  de production y mappe `main.js` sur `/static/js/main.<hash>.js`. S'il pointe sur
+  `/static/js/bundle.js`, c'est le serveur de développement qui tourne.
 
 ---
 

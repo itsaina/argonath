@@ -9,7 +9,10 @@ pragma solidity ^0.8.20;
 ///
 /// Seul le contrat RepoEscrow peut mint / burn.
 ///
-/// ERC-721 minimal (pas d'OZ — incompatible avec Hedera Paris EVM à cause de mcopy).
+/// PAS un ERC-721 : ni transferFrom, ni approve, ni ERC-165, ni tokenURI, et ownerOf est
+/// un mapping public qui renvoie address(0) pour un id inconnu là où ERC-721 exige un revert.
+/// Simple registre mint/burn, non transférable. OZ est écarté volontairement : son mcopy
+/// est incompatible avec la cible EVM Paris de Hedera.
 contract RepoReceiptNFT {
     string public constant name     = "Argonath Repo Receipt";
     string public constant symbol   = "REPO-RCT";

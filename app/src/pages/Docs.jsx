@@ -8,6 +8,14 @@ import { useWalletInterface } from "../services/wallets/useWalletInterface";
 import { CONTRACT_ADDRESSES, MOCK_CASH_ABI } from "../services/contracts";
 import { ContractFunctionParameterBuilder } from "../services/wallets/contractFunctionParameterBuilder";
 
+/** Les adresses viennent de l'environnement : le réseau affiché doit en découler,
+    sinon une chaîne locale s'annonce comme Hedera testnet. */
+const NETWORK_LABEL = ({
+  '0x128': 'Hedera Testnet',
+  '0x127': 'Hedera Mainnet',
+  '0x7a69': 'Local Hardhat',
+}[process.env.REACT_APP_CHAIN_ID] || `Chain ${process.env.REACT_APP_CHAIN_ID || 'unconfigured'}`);
+
 function toEvmAddress(accountId) {
   if (!accountId) return null;
   if (accountId.startsWith('0x')) return accountId.toLowerCase();
@@ -88,7 +96,7 @@ function FaucetSection({ accountId, walletInterface }) {
             sx={{ color: '#888', minWidth: 0, p: 0.5, fontSize: '1rem' }} title="Refresh balance">↻</Button>
         </Stack>
         <Typography variant="body2" color="#666">
-          Mint test wMGA tokens to your wallet on Hedera Testnet. Used as cash in repo transactions.
+          Mint test wMGA tokens to your wallet on {NETWORK_LABEL}. Used as cash in repo transactions.
         </Typography>
         {!accountId && <Alert severity="info" sx={{ py: 0 }}>Connect your wallet to use the faucet.</Alert>}
         <Stack direction="row" spacing={1} alignItems="center">
@@ -106,9 +114,9 @@ function FaucetSection({ accountId, walletInterface }) {
             sx={{ backgroundColor: '#1565c0', '&:hover': { backgroundColor: '#0d47a1' }, whiteSpace: 'nowrap' }}>
             {loading ? <CircularProgress size={16} color="inherit" /> : 'Get wMGA'}
           </Button>
-          {txHash && (
+          {txHash && process.env.REACT_APP_HASHSCAN_URL && (
             <Button size="small" variant="text"
-              href={`${process.env.REACT_APP_HASHSCAN_URL || 'https://hashscan.io/testnet/transaction/'}${txHash}`}
+              href={`${process.env.REACT_APP_HASHSCAN_URL}${txHash}`}
               target="_blank" sx={{ fontSize: '0.72rem' }}>
               HashScan ↗
             </Button>
@@ -137,13 +145,14 @@ const SECTIONS = [
     ],
   },
   {
-    title: 'Contracts (Hedera Testnet)',
+    title: `Contracts (${NETWORK_LABEL})`,
     contracts: [
       { name: 'ClaimRegistry',  env: 'REACT_APP_CLAIM_REGISTRY_ADDRESS' },
       { name: 'BondToken (ARGN HTS)', env: 'REACT_APP_BOND_TOKEN_ADDRESS' },
       { name: 'RepoEscrow',     env: 'REACT_APP_REPO_ESCROW_ADDRESS' },
       { name: 'BondMetadata',   env: 'REACT_APP_BOND_METADATA_ADDRESS' },
       { name: 'MockCash (wMGA)', env: 'REACT_APP_MOCK_CASH_ADDRESS' },
+      { name: 'RepoReceiptNFT', env: 'REACT_APP_REPO_RECEIPT_ADDRESS' },
     ],
   },
 ];
