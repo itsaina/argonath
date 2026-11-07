@@ -236,13 +236,6 @@ donnée personnelle n'ait jamais été publiée.
 
 ## Points relevés à la lecture
 
-**Bug bloquant dans `RepoCard`** — [`app/src/pages/Market.jsx:120`](app/src/pages/Market.jsx:120) :
-`isDefaultable` (ligne 120) et `isInMarginGrace` (ligne 122) lisent `isLender` / `isBorrower`
-avant leurs déclarations `const` (lignes 123-124). Par court-circuit, ça ne se déclenche que si
-`statusLabel === 'MarginCalled'` — une offre Mode A passée en margin call fait donc planter
-le rendu de sa carte avec un `ReferenceError`. Les cartes Mode B n'ont pas le problème,
-l'ordre y est correct.
-
 **Incohérence de période de grâce** — le README documente 4 h de `MARGIN_CALL_GRACE`, le
 front définit `GRACE_MS = 24h`
 ([`app/src/pages/Market.jsx:42`](app/src/pages/Market.jsx:42)), et cette constante n'est en
