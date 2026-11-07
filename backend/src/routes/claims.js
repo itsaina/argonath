@@ -7,6 +7,7 @@ const { signRedeemAuthorization } = require('../services/signer');
 const { mintAndTransfer } = require('../services/hts');
 const { publishEvent, phoneProof, identityProof, claimProof } = require('../services/hcs');
 const { normalizePhone } = require('../utils/phone');
+const { verifySession, bearer } = require('../services/sessions');
 
 // ABI minimal pour appeler BondMetadata.setMaturity
 const BOND_METADATA_ABI = [
@@ -29,11 +30,10 @@ async function setBondMaturity(wallet, maturityDateStr) {
   }
 }
 
-// Middleware simple : vérifie le token dépositaire (header Authorization: Bearer <password>)
+// Vérifie le jeton de session dépositaire (header Authorization: Bearer <token>).
 function requireDepositary(req, res, next) {
-  const auth = req.headers['authorization'] || '';
-  const token = auth.replace('Bearer ', '');
-  if (token !== process.env.DEPOSITARY_PASSWORD) {
+
+  if (!verifySession(bearer(req))) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   next();

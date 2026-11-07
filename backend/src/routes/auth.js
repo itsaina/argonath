@@ -1,11 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const { getSignerAddress } = require('../services/signer');
+const { createSession, revokeSession, bearer } = require('../services/sessions');
 
 /**
  * POST /api/auth/depositary
  * Vérifie le mot de passe du dépositaire.
- * Retourne un token simple (mot de passe hashé) stocké côté client.
+ * Retourne un jeton de session opaque, à usage unique côté client. Le mot de passe
+ * partagé reste le secret de connexion et ne quitte plus le serveur.
  */
 router.post('/depositary', (req, res) => {
   const { password } = req.body;
@@ -17,7 +19,17 @@ router.post('/depositary', (req, res) => {
 
   let signerAddress = null;
   try { signerAddress = getSignerAddress(); } catch {}
-  res.json({ token: process.env.DEPOSITARY_PASSWORD, signerAddress });
+  res.json({ token: createSession(), signerAddress });
+});
+
+/**
+ * POST /api/auth/logout
+ * Révoque la session en cours. Possible seulement depuis que le jeton est opaque :
+ * tant qu'il valait le mot de passe partagé, le révoquer aurait déconnecté tout le monde.
+ */
+router.post('/logout', (req, res) => {
+  revokeSession(bearer(req));
+  res.json({ success: true });
 });
 
 /**

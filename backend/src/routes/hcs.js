@@ -10,6 +10,7 @@
  *   scope=depositary requiert le token dépositaire (header Authorization).
  */
 const express = require('express');
+const { verifySession, bearer } = require('../services/sessions');
 const router  = express.Router();
 const { ethers } = require('ethers');
 const { publishEvent } = require('../services/hcs');
@@ -35,9 +36,7 @@ const MIRROR = 'https://testnet.mirrornode.hedera.com';
 
 // ─── Middleware dépositaire (optionnel — utilisé pour scope=depositary) ───────
 function isDepositary(req) {
-  const auth  = req.headers['authorization'] || '';
-  const token = auth.replace('Bearer ', '');
-  return token === process.env.DEPOSITARY_PASSWORD;
+  return verifySession(bearer(req));
 }
 
 // ─── POST /api/hcs/notify ─────────────────────────────────────────────────────
