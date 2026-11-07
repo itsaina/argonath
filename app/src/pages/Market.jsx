@@ -56,7 +56,27 @@ function getProvider() {
   );
 }
 
+/**
+ * Approuve des ARGN pour l'escrow.
+ *
+ * Sur Hedera, ARGN est un token HTS : l'approbation passe par le précompile 0x167.
+ * Ailleurs — chaîne Hardhat locale, par exemple — ce précompile n'existe pas. La
+ * transaction part alors vers une adresse sans code, réussit sans rien faire, et
+ * l'allowance reste à zéro ; l'appel suivant révoque sur ERC20InsufficientAllowance,
+ * un message qui ne désigne pas la cause. Hors Hedera, on approuve donc le token
+ * directement, comme n'importe quel ERC-20.
+ */
+const IS_HEDERA = ['0x128', '0x127'].includes(process.env.REACT_APP_CHAIN_ID);
+
 async function approveARGN(walletInterface, evmAccount, spender, amount) {
+  if (!IS_HEDERA) {
+    const params = new ContractFunctionParameterBuilder()
+      .addParam({ type: 'address', name: 'spender', value: spender })
+      .addParam({ type: 'uint256', name: 'amount',  value: amount });
+    return walletInterface.executeContractFunction(
+      CONTRACT_ADDRESSES.BondToken, 'approve', params, 100_000
+    );
+  }
   if (evmAccount && window.ethereum) {
     const iface = new ethers.utils.Interface([
       'function approve(address token, address spender, uint256 amount) returns (int64)'
@@ -145,7 +165,10 @@ function RepoCard({ offer, offerId, accountId, walletInterface, onRefresh }) {
       let txHash;
 
       if (action === 'accept') {
-        await approveARGN(walletInterface, evmAccount, CONTRACT_ADDRESSES.RepoEscrow, collateralReq);
+        // Sans ce garde-fou, une approbation échouée laissait partir accept(), qui
+        // révoquait sur ERC20InsufficientAllowance — une cause illisible pour l'utilisateur.
+        const approveTx = await approveARGN(walletInterface, evmAccount, CONTRACT_ADDRESSES.RepoEscrow, collateralReq);
+        if (!approveTx) throw new Error('ARGN approval failed — collateral was not authorized.');
         const acceptParams = new ContractFunctionParameterBuilder()
           .addParam({ type: 'uint256', name: 'offerId', value: offerId });
         txHash = await walletInterface.executeContractFunction(
