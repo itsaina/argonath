@@ -537,12 +537,22 @@ function ProposalsPanel({ requestId, borrowerAddress, accountId, walletInterface
   useEffect(() => { load(); }, [load]);
 
   const handleAccept = async (proposal) => {
+    if (!accountId || !walletInterface) return alert("Connect your wallet first.");
     setActionId(proposal.id);
     try {
-      // Accepter dans la DB off-chain
-      await acceptProposal(proposal.id);
-      // Note : setAcceptedLender (anti front-running) désactivé — absent du contrat déployé.
-      // Sera rétabli après redéploiement du contrat avec le champ acceptedLender.
+      // 1. Whitelist on-chain du prêteur (anti front-running).
+      //    Doit précéder l'acceptation off-chain : tant que acceptedLender vaut 0x0,
+      //    fundRequest reste ouvert à n'importe quel wallet qui lit la mempool.
+      const params = new ContractFunctionParameterBuilder()
+        .addParam({ type: 'uint256', name: 'requestId', value: requestId })
+        .addParam({ type: 'address', name: 'lender',    value: proposal.lender_address });
+      const txHash = await walletInterface.executeContractFunction(
+        CONTRACT_ADDRESSES.RepoEscrow, 'setAcceptedLender', params, 200_000
+      );
+      if (!txHash) throw new Error('On-chain lender whitelist failed — proposal not accepted.');
+
+      // 2. Acceptation off-chain, une fois la garde armée.
+      await acceptProposal(proposal.id, currentEvmAddr);
       await load();
     } catch (e) { alert(e.message); }
     setActionId('');

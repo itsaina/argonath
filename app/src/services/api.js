@@ -89,8 +89,11 @@ export const submitProposal = (requestId, lenderAddress, cashAmount, rateBps, du
     body: JSON.stringify({ requestId, lenderAddress, cashAmount, rateBps, durationSec }),
   });
 
-export const acceptProposal = (proposalId) =>
-  request(`/repo/proposals/${proposalId}/accept`, { method: 'PUT' });
+export const acceptProposal = (proposalId, borrowerAddress) =>
+  request(`/repo/proposals/${proposalId}/accept`, {
+    method: 'PUT',
+    body: JSON.stringify({ borrowerAddress }),
+  });
 
 export const rejectProposal = (proposalId) =>
   request(`/repo/proposals/${proposalId}/reject`, { method: 'PUT' });
